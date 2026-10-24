@@ -1,0 +1,134 @@
+// CodeSync Hub data model — SPEC section 5.
+// Columns are snake_case in Postgres (via @map/@@map); all timestamps are UTC.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Platform {
+  linkedin
+  facebook
+  instagram
+
+  @@map("platform")
+}
+
+enum ContentType {
+  text
+  code
+
+  @@map("content_type")
+}
+
+enum CarouselMode {
+  auto
+  on
+  off
+
+  @@map("carousel_mode")
+}
+
+enum PostSource {
+  manual
+  ai
+
+  @@map("post_source")
+}
+
+enum PostStatus {
+  draft
+  scheduled
+  processing
+  published
+  partial
+  failed
+
+  @@map("post_status")
+}
+
+enum TargetStatus {
+  pending
+  processing
+  published
+  failed
+
+  @@map("target_status")
+}
+
+model SocialAccount {
+  id              String    @id @default(uuid()) @db.Uuid
+  platform        Platform
+  externalId      String    @map("external_id")
+  displayName     String    @map("display_name")
+  accessTokenEnc  String    @map("access_token_enc") @db.Text
+  refreshTokenEnc String?   @map("refresh_token_enc") @db.Text
+  expiresAt       DateTime? @map("expires_at") @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@unique([platform, externalId])
+  @@map("social_accounts")
+}
+
+model Post {
+  id           String       @id @default(uuid()) @db.Uuid
+  title        String?      @db.VarChar(200)
+  bodyText     String       @map("body_text") @db.Text
+  contentType  ContentType  @default(text) @map("content_type")
+  code         String?      @db.Text
+  language     String?      @db.VarChar(50)
+  theme        String       @db.VarChar(50)
+  caption      String       @db.Text
+  carouselMode CarouselMode @default(auto) @map("carousel_mode")
+  source       PostSource   @default(manual)
+  aiPrompt     String?      @map("ai_prompt") @db.Text
+  status       PostStatus   @default(draft)
+  scheduledAt  DateTime?    @map("scheduled_at") @db.Timestamptz(3)
+  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  media   PostMedia[]
+  targets PostTarget[]
+
+  // Dispatch query: scheduled posts that are due.
+  @@index([status, scheduledAt])
+  @@map("posts")
+}
+
+model PostMedia {
+  id         String @id @default(uuid()) @db.Uuid
+  postId     String @map("post_id") @db.Uuid
+  slideIndex Int    @map("slide_index")
+  url        String @db.Text
+  width      Int
+  height     Int
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, slideIndex])
+  @@map("post_media")
+}
+
+model PostTarget {
+  id              String       @id @default(uuid()) @db.Uuid
+  postId          String       @map("post_id") @db.Uuid
+  platform        Platform
+  captionOverride String?      @map("caption_override") @db.Text
+  status          TargetStatus @default(pending)
+  attempts        Int          @default(0)
+  lastError       String?      @map("last_error") @db.Text
+  externalPostId  String?      @map("external_post_id") @db.Text
+  publishedAt     DateTime?    @map("published_at") @db.Timestamptz(3)
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  // Dispatch query: due, not-yet-published targets.
+  @@index([status])
+  @@index([postId])
+  @@map("post_targets")
+}

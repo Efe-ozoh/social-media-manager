@@ -33,6 +33,15 @@ enum CarouselMode {
   @@map("carousel_mode")
 }
 
+/// Background for a post's slides: the themed solid colour, or a photo
+/// chosen through the Unsplash picker (Phase 2b).
+enum BackgroundMode {
+  solid
+  unsplash
+
+  @@map("background_mode")
+}
+
 enum PostSource {
   manual
   ai
@@ -85,7 +94,16 @@ model Post {
   theme        String       @db.VarChar(50)
   caption      String       @db.Text
   carouselMode CarouselMode @default(auto) @map("carousel_mode")
-  source       PostSource   @default(manual)
+  // Background photo (Phase 2b). backgroundMode "solid" ignores the bg_* row.
+  backgroundMode  BackgroundMode @default(solid) @map("background_mode")
+  backgroundQuery String?        @map("background_query") @db.VarChar(120)
+  bgUnsplashId    String?        @map("bg_unsplash_id") @db.VarChar(64)
+  bgUrl           String?        @map("bg_url") @db.Text
+  bgThumbUrl      String?        @map("bg_thumb_url") @db.Text
+  bgAuthorName    String?        @map("bg_author_name") @db.VarChar(120)
+  bgAuthorUrl     String?        @map("bg_author_url") @db.Text
+  bgColor         String?        @map("bg_color") @db.VarChar(16)
+  source          PostSource     @default(manual)
   aiPrompt     String?      @map("ai_prompt") @db.Text
   status       PostStatus   @default(draft)
   scheduledAt  DateTime?    @map("scheduled_at") @db.Timestamptz(3)

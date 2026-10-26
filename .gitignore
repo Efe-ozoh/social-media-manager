@@ -20,6 +20,12 @@
 # production
 /build
 
+# rendered sample slides (npm run render:samples)
+/out/
+
+# local image store (used when BLOB_READ_WRITE_TOKEN is not set)
+/public/uploads/
+
 # misc
 .DS_Store
 *.pem

@@ -1,6 +1,8 @@
 # pnpm 11 reads its settings here (the package.json "pnpm" field is no longer used).
 # Prisma's CLI and engines need their install scripts to place native binaries.
+# esbuild (via tsx) places its platform binary the same way.
 allowBuilds:
   '@prisma/engines': true
   prisma: true
   unrs-resolver: true
+  esbuild: true

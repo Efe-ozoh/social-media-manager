@@ -8,7 +8,11 @@ import {
   sanitizeKey,
   type ImageStore,
 } from "./image-store";
-import { renderPost, type RenderablePost } from "./render-post";
+import {
+  deleteStaleImages,
+  renderPost,
+  type RenderablePost,
+} from "./render-post";
 
 const POST_ID = "11111111-1111-4111-8111-111111111111";
 const BASE_URL = "http://localhost:3000";
@@ -121,7 +125,7 @@ describe("renderPost", () => {
       });
 
       expect(second.media.map((row) => row.url)).toEqual(first.media.map((row) => row.url));
-      expect(second.removedKeys).toEqual([]);
+      expect(second.staleKeys).toEqual([]);
 
       const key = keyFromPublicUrl(first.media[0].url) as string;
       const dir = path.dirname(path.join(root, key));
@@ -131,7 +135,7 @@ describe("renderPost", () => {
   );
 
   it(
-    "deletes the previous render's images when the content changes",
+    "reports the previous render's images as stale and only deletes them on request",
     async () => {
       const { store, root } = await makeStore();
 
@@ -145,10 +149,19 @@ describe("renderPost", () => {
       );
 
       expect(second.media[0].url).not.toBe(first.media[0].url);
-      expect(second.removedKeys).toEqual([oldKey]);
-      await expect(stat(path.join(root, oldKey))).rejects.toThrow();
+      expect(second.staleKeys).toEqual([oldKey]);
+
+      // Nothing was deleted by the render itself: the caller may still fail
+      // to save, and the rows it has not replaced must keep working.
+      expect((await stat(path.join(root, oldKey))).isFile()).toBe(true);
 
       const newKey = keyFromPublicUrl(second.media[0].url) as string;
+      expect((await stat(path.join(root, newKey))).isFile()).toBe(true);
+
+      const cleanup = await deleteStaleImages(second.staleKeys, store);
+      expect(cleanup.deleted).toEqual([oldKey]);
+      expect(cleanup.failed).toEqual([]);
+      await expect(stat(path.join(root, oldKey))).rejects.toThrow();
       expect((await stat(path.join(root, newKey))).isFile()).toBe(true);
     },
     30_000,
@@ -157,18 +170,26 @@ describe("renderPost", () => {
   it(
     "never deletes images belonging to another post",
     async () => {
-      const { store } = await makeStore();
+      const { store, root } = await makeStore();
       const recording = new RecordingStore(store);
       const foreign = `posts/22222222-2222-4222-8222-222222222222/abc/slide-1.png`;
       const ownStale = `posts/${POST_ID}/stale/slide-9.png`;
+      await store.put(Buffer.from("foreign"), foreign);
+      await store.put(Buffer.from("own"), ownStale);
 
       const result = await renderPost(post(), recording, {
         previousUrls: [`${BASE_URL}/uploads/${foreign}`, `${BASE_URL}/uploads/${ownStale}`],
       });
 
-      expect(result.removedKeys).toEqual([ownStale]);
+      // Rendering deletes nothing at all now.
+      expect(recording.deleted).toEqual([]);
+      expect(result.staleKeys).toEqual([ownStale]);
+
+      await deleteStaleImages(result.staleKeys, recording);
       expect(recording.deleted).toEqual([ownStale]);
       expect(recording.deleted).not.toContain(foreign);
+      await expect(stat(path.join(root, ownStale))).rejects.toThrow();
+      expect((await stat(path.join(root, foreign))).isFile()).toBe(true);
     },
     30_000,
   );
@@ -190,7 +211,7 @@ describe("renderPost", () => {
   });
 
   it(
-    "removes old images and returns no media for empty content",
+    "returns no media and stale keys for empty content",
     async () => {
       const { store, root } = await makeStore();
 
@@ -203,9 +224,49 @@ describe("renderPost", () => {
 
       expect(result.media).toEqual([]);
       expect(result.slideCount).toBe(0);
-      expect(result.removedKeys).toEqual([oldKey]);
+      expect(result.staleKeys).toEqual([oldKey]);
+      expect((await stat(path.join(root, oldKey))).isFile()).toBe(true);
+
+      await deleteStaleImages(result.staleKeys, store);
       await expect(stat(path.join(root, oldKey))).rejects.toThrow();
     },
     30_000,
   );
+});
+
+describe("deleteStaleImages", () => {
+  it("deduplicates keys and is idempotent", async () => {
+    const { store, root } = await makeStore();
+    const key = `posts/${POST_ID}/abc/slide-1.png`;
+    await store.put(Buffer.from("slide"), key);
+
+    const first = await deleteStaleImages([key, key], store);
+    expect(first.deleted).toEqual([key]);
+    expect(first.failed).toEqual([]);
+
+    // The local store treats a missing object as success, so a retry is safe.
+    const second = await deleteStaleImages([key], store);
+    expect(second.deleted).toEqual([key]);
+    await expect(stat(path.join(root, key))).rejects.toThrow();
+  });
+
+  it("reports failures instead of throwing, so a saved post stays saved", async () => {
+    const store: ImageStore = {
+      kind: "local-disk",
+      put: async () => `${BASE_URL}/uploads/x.png`,
+      delete: async (key) => {
+        if (key.endsWith("slide-2.png")) throw new Error("storage unavailable");
+      },
+    };
+
+    const result = await deleteStaleImages(
+      [`posts/${POST_ID}/abc/slide-1.png`, `posts/${POST_ID}/abc/slide-2.png`],
+      store,
+    );
+
+    expect(result.deleted).toEqual([`posts/${POST_ID}/abc/slide-1.png`]);
+    expect(result.failed).toEqual([
+      { key: `posts/${POST_ID}/abc/slide-2.png`, error: "storage unavailable" },
+    ]);
+  });
 });

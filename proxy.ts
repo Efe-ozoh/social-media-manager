@@ -1,9 +1,16 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE, verifySessionToken } from "@/lib/session";
 
-// Everything requires login except the login page and the login endpoint.
-// (OAuth callbacks and the cron endpoint will be added in later phases.)
-const PUBLIC_PATHS = ["/login", "/api/auth/login"];
+// Everything requires login except the login page, the login endpoint and the
+// platform OAuth callbacks (SPEC section 12). A callback is protected by its
+// own one-shot `state` cookie, and the browser arrives from the provider as a
+// top-level navigation. The cron endpoint joins this list in Phase 4.
+const PUBLIC_PATHS = [
+  "/login",
+  "/api/auth/login",
+  "/api/auth/linkedin/callback",
+  "/api/auth/meta/callback",
+];
 
 export async function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;

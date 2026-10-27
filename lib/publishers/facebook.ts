@@ -15,9 +15,13 @@
  * uploads stay available for about 24 hours, so the feed post is created
  * immediately after the last upload.
  *
- * Meta does not document a maximum number of `attached_media` entries (its
- * "maximum of 10" applies to multi-link `child_attachments`), so the cap here
- * is our own carousel limit.
+ * Meta states no maximum number of `attached_media` entries on the current
+ * Page Feed and Page Photos references — they show a two-photo example but give
+ * no cap (the documented "maximum of 10" belongs to multi-link
+ * `child_attachments`, a different feature). The cap here is therefore our own
+ * carousel limit, not a documented platform limit.
+ *   https://developers.facebook.com/docs/graph-api/reference/page/photos/
+ *   https://developers.facebook.com/docs/graph-api/reference/page/feed/
  *
  * Meta fetches every image URL itself, which is why the URLs must be public
  * HTTPS: see `assertPublicImageUrls`.
@@ -37,9 +41,13 @@ import {
   type Publisher,
 } from "./types";
 
-/** Documented Page post text limit. */
+/**
+ * Facebook's long-standing post length limit. The current Page Feed and Post
+ * references describe `message` without stating a maximum, so this is the
+ * value Facebook has enforced historically, kept as a safety bound.
+ */
 export const FACEBOOK_MAX_CAPTION = 63_206;
-/** Our carousel cap; Meta documents no attached_media maximum. */
+/** Our own carousel cap; Meta documents no attached_media maximum. */
 export const FACEBOOK_MAX_IMAGES = 10;
 
 type FetchImpl = typeof fetch;

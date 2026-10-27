@@ -10,7 +10,16 @@
  * a text shadow and a "Photo by {name} on Unsplash" credit on the first slide.
  * Code cards stay solid unless `usePhotoBehindCode` is set.
  *
- * Pure rendering: the PNG bytes are returned to the caller. No image upload,
+ * Each slide is drawn to PNG by resvg and then re-encoded as JPEG, because
+ * Instagram documents JPEG as the only image format it accepts and JPEG has no
+ * alpha channel to composite. resvg cannot emit JPEG, so `sharp` does the last
+ * step: it is the encoder Next itself uses on Vercel, it ships prebuilt
+ * binaries for the serverless runtime, and it flattens, colour-converts and
+ * encodes in a single pass, which no pure-JS encoder matches. PNG output stays
+ * available for the dashboard preview and the sample script, which only need
+ * something a browser can open.
+ *
+ * Pure rendering: the image bytes are returned to the caller. No image upload,
  * no database, no network — a background is passed in as bytes.
  */
 
@@ -19,6 +28,7 @@ import path from "node:path";
 import type { ReactNode } from "react";
 import satori from "satori";
 import { Resvg } from "@resvg/resvg-js";
+import sharp from "sharp";
 import { createHighlighter, type BundledLanguage, type Highlighter } from "shiki";
 import type {
   ResolvedSplitterConfig,
@@ -30,6 +40,16 @@ import type {
 /** SPEC section 8: fixed size 1080 x 1350 px (4:5) for all slides. */
 export const SLIDE_WIDTH = 1080;
 export const SLIDE_HEIGHT = 1350;
+
+/**
+ * JPEG quality for uploaded slides. 91 keeps type edges clean at 1080 x 1350,
+ * and a slide encoded this way lands in the low hundreds of kilobytes — far
+ * below Instagram's documented 8 MB ceiling.
+ */
+export const SLIDE_JPEG_QUALITY = 91;
+
+/** What `renderPost` uploads, and the format both Meta publishers accept. */
+export const SLIDE_JPEG_CONTENT_TYPE = "image/jpeg";
 
 const MONO_FAMILY = "Geist Mono";
 const SANS_FAMILY = "Geist Sans";
@@ -301,6 +321,51 @@ export async function renderSlidesPng(
     );
   }
   return pngs;
+}
+
+/**
+ * The solid colour a card is drawn on. JPEG has no alpha channel, so this is
+ * what a transparent pixel gets flattened onto.
+ */
+export function slideBackgroundColor(contentType: SplitContentType): string {
+  return THEMES[contentType].background;
+}
+
+/**
+ * Re-encodes a rendered PNG as JPEG.
+ *
+ * `flatten` composites any alpha onto the card's own background colour rather
+ * than onto white, so a soft overlay edge keeps the colour of the card it sits
+ * on. `toColourspace("srgb")` pins the colour space, since Instagram converts
+ * and re-encodes whatever it downloads and an untagged image invites a shift
+ * in the theme colours.
+ */
+export async function pngToJpeg(png: Buffer, background: string): Promise<Buffer> {
+  return sharp(png)
+    .flatten({ background })
+    .toColourspace("srgb")
+    .jpeg({ quality: SLIDE_JPEG_QUALITY, chromaSubsampling: "4:4:4" })
+    .toBuffer();
+}
+
+/** Renders a single slide straight to the JPEG bytes that get uploaded. */
+export async function renderSlideJpeg(input: SlideRenderInput): Promise<Buffer> {
+  const png = await renderSlidePng(input);
+  return pngToJpeg(png, slideBackgroundColor(input.contentType));
+}
+
+/**
+ * Renders every slide of a split to JPEG, in slide order. The encoding runs in
+ * parallel: sharp releases the event loop, so the slides overlap instead of
+ * being encoded one after another.
+ */
+export async function renderSlidesJpeg(
+  result: SplitResult,
+  options: SlideBackgroundOptions = {},
+): Promise<Buffer[]> {
+  const pngs = await renderSlidesPng(result, options);
+  const background = slideBackgroundColor(result.contentType);
+  return Promise.all(pngs.map((png) => pngToJpeg(png, background)));
 }
 
 /**

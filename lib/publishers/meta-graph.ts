@@ -269,6 +269,14 @@ const INSTAGRAM_SUBCODES: Record<
     code: "permission_denied",
     message: "Instagram flagged this publishing attempt as spam and refused it. Do not retry blindly.",
   },
+  2207028: {
+    code: "validation",
+    // The publishing guide and the media reference allow 20 carousel items;
+    // the error table is the one page still describing 10. Whichever limit
+    // this account enforces, the owner needs to see both numbers.
+    message:
+      "Instagram refused the carousel because of how many items it has. The Content Publishing guide and the media reference allow up to 20, but the error-code reference still documents 10, so this account may be capped at 10.",
+  },
 };
 
 type GraphErrorBody = {

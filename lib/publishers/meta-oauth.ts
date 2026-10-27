@@ -75,13 +75,18 @@ export const META_PAGE_FIELDS = "id,name,access_token,instagram_business_account
 
 const REQUEST_TIMEOUT_MS = 15_000;
 
+/**
+ * The reason codes the callback puts on the redirect. Every failure path maps
+ * to one of these, so the app never has to interpret a free-form message — and
+ * a code is never something that could carry a token.
+ */
 export type MetaOAuthErrorCode =
   | "not_configured"
   | "state_mismatch"
   | "denied"
-  | "provider_error"
-  | "invalid_response"
-  | "no_pages";
+  | "no_page"
+  | "no_instagram_account"
+  | "provider_error";
 
 /** An OAuth failure whose message is safe to show the owner and to log. */
 export class MetaOAuthError extends Error {
@@ -112,8 +117,16 @@ export type MetaConnectedAccount = {
 };
 
 export type MetaConnection = {
+  /**
+   * Exactly two rows, in this order: the chosen Page, then the Instagram
+   * professional account linked to it.
+   */
   accounts: MetaConnectedAccount[];
-  /** Non-fatal remarks, e.g. a Page whose Instagram link could not be read. */
+  /** The Page that was chosen, so the callback can report which one. */
+  page: { id: string; name: string };
+  /** The Instagram account linked to that Page. */
+  instagram: { id: string; displayName: string };
+  /** Non-fatal remarks, e.g. an Instagram username that could not be read. */
   notes: string[];
 };
 
@@ -254,7 +267,10 @@ export async function exchangeMetaAuthorizationCode(options: {
 
   const accessToken = typeof body?.access_token === "string" ? body.access_token : "";
   if (!accessToken) {
-    throw new MetaOAuthError("invalid_response", "Meta did not return an access token.");
+    throw new MetaOAuthError(
+      "provider_error",
+      "Meta did not return an access token. Try connecting again.",
+    );
   }
 
   const expiresIn =
@@ -284,8 +300,8 @@ export async function exchangeForLongLivedToken(options: {
   const accessToken = typeof body?.access_token === "string" ? body.access_token : "";
   if (!accessToken) {
     throw new MetaOAuthError(
-      "invalid_response",
-      "Meta did not return a long-lived access token.",
+      "provider_error",
+      "Meta did not return a long-lived access token. Try connecting again.",
     );
   }
 
@@ -327,7 +343,7 @@ export async function fetchManagedPages(options: {
 
   if (!Array.isArray(body?.data)) {
     throw new MetaOAuthError(
-      "invalid_response",
+      "provider_error",
       "Meta returned no Page list. Grant the pages_show_list permission and try again.",
     );
   }
@@ -454,14 +470,41 @@ export async function completeMetaConnection(options: {
 
   if (pages.length === 0) {
     throw new MetaOAuthError(
-      "no_pages",
+      "no_page",
       "No Facebook Page was found for this account. You must be an admin of a Page, and the pages_show_list permission must be granted.",
+    );
+  }
+
+  // Instagram is published to through the Page it is linked to, so the Page
+  // that has a linked Instagram account is the one to connect. When several
+  // qualify the first is used, and the caller records which one that was.
+  const candidates = pages.filter(
+    (candidate): candidate is MetaPage & { instagramId: string } =>
+      typeof candidate.instagramId === "string" && candidate.instagramId !== "",
+  );
+  const page = candidates[0];
+
+  if (!page) {
+    throw new MetaOAuthError(
+      "no_instagram_account",
+      pages.length === 1
+        ? `The Page "${pages[0].name}" has no linked Instagram professional account. Link one in the Instagram app (Settings → Account type and tools), then connect again.`
+        : `None of the ${pages.length} Pages this account manages has a linked Instagram professional account. Link one in the Instagram app, then connect again.`,
     );
   }
 
   const now = options.now ?? new Date();
   const notes: string[] = [];
-  const accounts: MetaConnectedAccount[] = [];
+
+  if (candidates.length > 1) {
+    const ignored = candidates
+      .slice(1)
+      .map((candidate) => `"${candidate.name}"`)
+      .join(", ");
+    notes.push(
+      `${candidates.length} Pages have a linked Instagram account; using "${page.name}" (${page.id}) and ignoring ${ignored}.`,
+    );
+  }
 
   let userTokenEnc: string;
   try {
@@ -478,56 +521,55 @@ export async function completeMetaConnection(options: {
 
   const userTokenExpiresAt = new Date(now.getTime() + longLived.expiresIn * 1000);
 
-  for (const page of pages) {
-    let pageTokenEnc: string;
-    try {
-      pageTokenEnc = encryptToken(page.accessToken, options.key);
-    } catch (error) {
-      const keyError = error as TokenCryptoError;
-      throw new MetaOAuthError(
-        "not_configured",
-        keyError?.message ?? "The Page access token could not be encrypted.",
-      );
-    }
+  let pageTokenEnc: string;
+  try {
+    pageTokenEnc = encryptToken(page.accessToken, options.key);
+  } catch (error) {
+    const keyError = error as TokenCryptoError;
+    throw new MetaOAuthError(
+      "not_configured",
+      keyError?.message ?? "The Page access token could not be encrypted.",
+    );
+  }
 
-    accounts.push({
+  let instagramDisplayName = `Instagram ${page.instagramId}`;
+  try {
+    const instagram = await fetchInstagramAccount({
+      instagramId: page.instagramId,
+      userToken: longLived.accessToken,
+      config: options.config,
+      fetchImpl: options.fetchImpl,
+    });
+    if (instagram.username) instagramDisplayName = `@${instagram.username}`;
+  } catch (error) {
+    // The IG id is enough to publish with; a missing username is cosmetic.
+    const message = error instanceof MetaOAuthError ? error.message : "unknown error";
+    notes.push(`Could not read the Instagram username for page "${page.name}": ${message}`);
+  }
+
+  const accounts: MetaConnectedAccount[] = [
+    {
       platform: "facebook",
       externalId: page.id,
       displayName: page.name,
       accessTokenEnc: pageTokenEnc,
       // Documented as having no expiration date; it can still be revoked.
       expiresAt: null,
-    });
-
-    if (!page.instagramId) {
-      notes.push(`Page "${page.name}" has no linked Instagram professional account.`);
-      continue;
-    }
-
-    let displayName = `Instagram ${page.instagramId}`;
-    try {
-      const instagram = await fetchInstagramAccount({
-        instagramId: page.instagramId,
-        userToken: longLived.accessToken,
-        config: options.config,
-        fetchImpl: options.fetchImpl,
-      });
-      if (instagram.username) displayName = `@${instagram.username}`;
-    } catch (error) {
-      // The IG id is enough to publish with; a missing username is cosmetic.
-      const message = error instanceof MetaOAuthError ? error.message : "unknown error";
-      notes.push(`Could not read the Instagram username for page "${page.name}": ${message}`);
-    }
-
-    accounts.push({
+    },
+    {
       platform: "instagram",
       externalId: page.instagramId,
-      displayName,
+      displayName: instagramDisplayName,
       // The Instagram media endpoints take the user token for this flavour.
       accessTokenEnc: userTokenEnc,
       expiresAt: userTokenExpiresAt,
-    });
-  }
+    },
+  ];
 
-  return { accounts, notes };
+  return {
+    accounts,
+    page: { id: page.id, name: page.name },
+    instagram: { id: page.instagramId, displayName: instagramDisplayName },
+    notes,
+  };
 }

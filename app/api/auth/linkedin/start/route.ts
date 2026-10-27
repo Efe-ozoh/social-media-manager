@@ -3,6 +3,7 @@ import {
   buildAuthorizeUrl,
   createOAuthState,
   getLinkedInConfig,
+  LINKEDIN_CALLBACK_PATH,
   LINKEDIN_STATE_COOKIE,
   LINKEDIN_STATE_TTL_SECONDS,
   LinkedInOAuthError,
@@ -27,8 +28,8 @@ function backToApp(request: NextRequest, reason: string) {
  * Begins the OAuth flow. Login is enforced by proxy.ts (only the callback is
  * public), so the owner must be signed in to connect an account.
  *
- * The CSRF `state` goes into a short-lived httpOnly cookie scoped to this
- * route tree, and is compared on the callback.
+ * The CSRF `state` goes into a short-lived httpOnly cookie scoped to the
+ * callback path, and is compared there.
  */
 export async function GET(request: NextRequest) {
   let config: LinkedInConfig;
@@ -41,6 +42,13 @@ export async function GET(request: NextRequest) {
     return backToApp(request, "not_configured");
   }
 
+  // Printed every time the flow starts, because this exact string has to be
+  // registered on the LinkedIn app or LinkedIn refuses the redirect.
+  console.log(
+    "[linkedin] Redirect URL to register in the LinkedIn app (Auth → OAuth 2.0 " +
+      `settings → Authorized redirect URLs): ${config.redirectUri}`,
+  );
+
   const state = createOAuthState();
   const authorizeUrl = buildAuthorizeUrl({ config, state });
 
@@ -51,7 +59,7 @@ export async function GET(request: NextRequest) {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
-    path: "/api/auth/linkedin",
+    path: LINKEDIN_CALLBACK_PATH,
     maxAge: LINKEDIN_STATE_TTL_SECONDS,
   });
 

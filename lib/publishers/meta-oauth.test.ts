@@ -205,7 +205,7 @@ describe("exchangeMetaAuthorizationCode", () => {
       exchangeMetaAuthorizationCode({ code: "c", config, fetchImpl }),
     );
 
-    expect(error.code).toBe("invalid_response");
+    expect(error.code).toBe("provider_error");
   });
 
   it("reports a transport failure without echoing the secret", async () => {
@@ -393,9 +393,119 @@ describe("completeMetaConnection", () => {
       }),
     );
 
-    expect(error.code).toBe("no_pages");
+    expect(error.code).toBe("no_page");
     expect(error.message).toContain("admin of a Page");
     expect(error.message).toContain("pages_show_list");
+  });
+
+  it("asks for an Instagram account when the Pages have none linked", async () => {
+    const { fetchImpl } = mockFetch(
+      happyRoute({
+        pages: [
+          { id: "page-1", name: "First", access_token: PAGE_TOKEN },
+          { id: "page-2", name: "Second", access_token: PAGE_TOKEN },
+        ],
+      }),
+    );
+
+    const error = await oauthError(
+      completeMetaConnection({
+        code: "c",
+        state: STATE,
+        cookieState: STATE,
+        config,
+        fetchImpl,
+        key: KEY,
+      }),
+    );
+
+    expect(error.code).toBe("no_instagram_account");
+    // Two Pages, so the message counts them instead of naming one.
+    expect(error.message).toContain("None of the 2 Pages");
+  });
+
+  it("uses the first Page that has a linked Instagram account and records it", async () => {
+    const { fetchImpl, calls } = mockFetch(
+      happyRoute({
+        pages: [
+          { id: "page-1", name: "No Instagram", access_token: PAGE_TOKEN },
+          {
+            id: "page-2",
+            name: "Has Instagram",
+            access_token: "EAA-second-page-token-9876543210",
+            instagram_business_account: { id: "17841400000000002" },
+          },
+          {
+            id: "page-3",
+            name: "Also Instagram",
+            access_token: PAGE_TOKEN,
+            instagram_business_account: { id: "17841400000000003" },
+          },
+        ],
+      }),
+    );
+
+    const connection = await completeMetaConnection({
+      code: "c",
+      state: STATE,
+      cookieState: STATE,
+      config,
+      fetchImpl,
+      key: KEY,
+      now,
+    });
+
+    expect(connection.page).toEqual({ id: "page-2", name: "Has Instagram" });
+    expect(connection.instagram.id).toBe("17841400000000002");
+
+    // Exactly two rows: the chosen Page and its Instagram account.
+    expect(connection.accounts).toHaveLength(2);
+    expect(connection.accounts.map((account) => account.platform)).toEqual([
+      "facebook",
+      "instagram",
+    ]);
+    expect(connection.accounts[0].externalId).toBe("page-2");
+    expect(decryptToken(connection.accounts[0].accessTokenEnc, KEY)).toBe(
+      "EAA-second-page-token-9876543210",
+    );
+
+    // The Page that was skipped is named, so a surprising choice is visible.
+    expect(connection.notes[0]).toContain("2 Pages have a linked Instagram account");
+    expect(connection.notes[0]).toContain("Also Instagram");
+
+    // The username lookup uses the chosen IG id, not the first Page's.
+    expect(calls.some((call) => call.url.includes("17841400000000002"))).toBe(true);
+    expect(calls.some((call) => call.url.includes("page-3"))).toBe(false);
+  });
+
+  it("stores nothing but the chosen Page when several Pages exist", async () => {
+    const { fetchImpl, calls } = mockFetch(
+      happyRoute({
+        pages: [
+          { id: "page-1", name: "One", access_token: PAGE_TOKEN },
+          {
+            id: "page-2",
+            name: "Two",
+            access_token: PAGE_TOKEN,
+            instagram_business_account: { id: IG_ID },
+          },
+        ],
+      }),
+    );
+
+    const connection = await completeMetaConnection({
+      code: "c",
+      state: STATE,
+      cookieState: STATE,
+      config,
+      fetchImpl,
+      key: KEY,
+      now,
+    });
+
+    expect(connection.accounts).toHaveLength(2);
+    // token, long-lived token, Pages, Instagram username.
+    expect(calls).toHaveLength(4);
   });
 
   it("keeps the Instagram account when its username cannot be read", async () => {
@@ -419,24 +529,24 @@ describe("completeMetaConnection", () => {
     expect(connection.notes[0]).toContain("Could not read the Instagram username");
   });
 
-  it("notes a Page without a linked Instagram account", async () => {
+  it("names the single Page that has no linked Instagram account", async () => {
     const { fetchImpl } = mockFetch(
       happyRoute({ pages: [{ id: "page-2", name: "No Instagram", access_token: PAGE_TOKEN }] }),
     );
 
-    const connection = await completeMetaConnection({
-      code: "c",
-      state: STATE,
-      cookieState: STATE,
-      config,
-      fetchImpl,
-      key: KEY,
-      now,
-    });
+    const error = await oauthError(
+      completeMetaConnection({
+        code: "c",
+        state: STATE,
+        cookieState: STATE,
+        config,
+        fetchImpl,
+        key: KEY,
+      }),
+    );
 
-    expect(connection.accounts).toHaveLength(1);
-    expect(connection.accounts[0].platform).toBe("facebook");
-    expect(connection.notes[0]).toContain("no linked Instagram professional account");
+    expect(error.code).toBe("no_instagram_account");
+    expect(error.message).toContain('"No Instagram"');
   });
 
   it("stores nothing when the encryption key is unusable", async () => {

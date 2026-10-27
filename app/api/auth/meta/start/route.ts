@@ -3,6 +3,7 @@ import {
   buildMetaAuthorizeUrl,
   createOAuthState,
   getMetaConfig,
+  META_CALLBACK_PATH,
   META_STATE_COOKIE,
   META_STATE_TTL_SECONDS,
   MetaOAuthError,
@@ -28,8 +29,8 @@ function backToApp(request: NextRequest, reason: string) {
  * Instagram account linked to it. Login is enforced by proxy.ts (only the
  * callback is public), so the owner must be signed in.
  *
- * The CSRF `state` lives in a short-lived httpOnly cookie scoped to this
- * route tree and is compared on the callback.
+ * The CSRF `state` lives in a short-lived httpOnly cookie scoped to the
+ * callback path and is compared there.
  */
 export async function GET(request: NextRequest) {
   let config: MetaConfig;
@@ -42,6 +43,13 @@ export async function GET(request: NextRequest) {
     return backToApp(request, "not_configured");
   }
 
+  // Printed every time the flow starts, because this exact string has to be
+  // registered on the Meta app or Facebook refuses the redirect.
+  console.log(
+    "[meta] Redirect URL to register in the Meta app (Facebook Login → Settings → " +
+      `Valid OAuth Redirect URIs): ${config.redirectUri}`,
+  );
+
   const state = createOAuthState();
   const authorizeUrl = buildMetaAuthorizeUrl({ config, state });
 
@@ -52,7 +60,7 @@ export async function GET(request: NextRequest) {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
-    path: "/api/auth/meta",
+    path: META_CALLBACK_PATH,
     maxAge: META_STATE_TTL_SECONDS,
   });
 

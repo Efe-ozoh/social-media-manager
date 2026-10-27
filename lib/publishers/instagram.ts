@@ -13,16 +13,33 @@
  *      POST /{ig-user-id}/media_publish with creation_id.
  *   https://developers.facebook.com/documentation/instagram-platform/content-publishing
  *
- * Limits taken from the current docs:
- *   - caption: 2,200 characters
- *   - carousel: the guide says up to 20 items, while the error-code reference
- *     still documents 2207028 for more than 10. The conservative, documented
- *     ceiling of 10 is enforced here.
- *   - images: JPEG only, 8 MB max, aspect ratio 4:5 to 1.91:1, width 320-1440.
- *   - polling: Meta recommends querying once a minute for no more than five
- *     minutes. This polls more often but gives up sooner, and reports a
- *     retryable failure so the scheduler can try again rather than holding a
- *     request open for five minutes.
+ * Limits taken from the current docs (checked against the pages cited below):
+ *   - caption: 2,200 characters, with 30 hashtags and 20 @ tags. The caption
+ *     belongs to the carousel as a whole, not to the individual items.
+ *   - carousel: 2 to 20 items, per the Content Publishing guide ("Carousels are
+ *     limited to 20 images, videos, or a mix of the two") and the IG User Media
+ *     reference (`children` is "an array of up to 20 container IDs"). The
+ *     Instagram error-code page still describes the old 10-item ceiling, so
+ *     error 2207028 is mapped below with that conflict spelled out rather than
+ *     guessed at.
+ *   - images: JPEG only (extended JPEG formats such as MPO and JPS excluded),
+ *     8 MB max, aspect ratio 4:5 to 1.91:1, width 320-1440. The renderer
+ *     uploads JPEG slides (lib/renderer.tsx), so this is satisfied by
+ *     construction; the 2207005/36001 mapping in meta-graph.ts stays as the
+ *     fallback message in case a slide is ever another format.
+ *   - polling: Meta recommends "querying a container's status once per minute,
+ *     for no more than 5 minutes", and reports IN_PROGRESS, FINISHED, ERROR,
+ *     EXPIRED and PUBLISHED. This polls more often but gives up sooner, and
+ *     reports a retryable failure so the scheduler can try again rather than
+ *     holding a request open for five minutes.
+ *
+ * Not implemented here: POST/GET /{ig-user-id}/content_publishing_limit reports
+ * the account's publishing quota (`quota_usage`, plus `config.quota_total` and
+ * `config.quota_duration`). The docs disagree about the ceiling — the Content
+ * Publishing guide says 100 API-published posts per moving 24-hour period,
+ * while the quota reference and the guide's carousel section say 50 — so the
+ * quota is left to the retryable rate-limit path below until it is needed.
+ *   https://developers.facebook.com/documentation/instagram-platform/instagram-graph-api/reference/ig-user/content_publishing_limit
  *
  * Instagram fetches the image URLs itself, so they must be public HTTPS URLs;
  * a localhost URL is rejected with a clear error instead of failing inside
@@ -43,10 +60,13 @@ import {
   type Publisher,
 } from "./types";
 
-/** Documented caption limit. */
+/** Documented caption limit: "Maximum 2200 characters, 30 hashtags, and 20 @ tags". */
 export const INSTAGRAM_MAX_CAPTION = 2_200;
-/** Documented carousel ceiling (see the note above). */
-export const INSTAGRAM_MAX_CAROUSEL_ITEMS = 10;
+/**
+ * Documented carousel ceiling (see the note above): the Content Publishing
+ * guide and the IG User Media reference both say 20.
+ */
+export const INSTAGRAM_MAX_CAROUSEL_ITEMS = 20;
 
 const DEFAULT_POLL_INTERVAL_MS = 3_000;
 const DEFAULT_POLL_TIMEOUT_MS = 120_000;
@@ -72,14 +92,6 @@ export type InstagramPublisherOptions = {
 function stringField(body: Record<string, unknown>, key: string): string | undefined {
   const value = body[key];
   return typeof value === "string" && value !== "" ? value : undefined;
-}
-
-function isPngUrl(value: string): boolean {
-  try {
-    return new URL(value).pathname.toLowerCase().endsWith(".png");
-  } catch {
-    return false;
-  }
 }
 
 export class InstagramPublisher implements Publisher {
@@ -118,14 +130,6 @@ export class InstagramPublisher implements Publisher {
     const igUserId = account.externalId.trim();
     const token = account.accessToken;
     const caption = input.caption.trim();
-    const notes: string[] = [];
-
-    if (input.imageUrls.some(isPngUrl)) {
-      notes.push(
-        "Instagram documents JPEG as the only supported image format, but these slides are PNG. " +
-          "If publishing fails with 36001 / 2207005, the renderer needs to output JPEG.",
-      );
-    }
 
     const containerId =
       input.imageUrls.length === 1
@@ -156,11 +160,7 @@ export class InstagramPublisher implements Publisher {
       });
     }
 
-    return {
-      externalPostId,
-      publishedAt: new Date(),
-      ...(notes.length > 0 ? { notes } : {}),
-    };
+    return { externalPostId, publishedAt: new Date() };
   }
 
   /** One child container per slide, then the parent carousel container. */

@@ -5,7 +5,9 @@ import { createElement } from "react";
 import satori from "satori";
 import { Resvg } from "@resvg/resvg-js";
 import {
+  pngToJpeg,
   renderSlidesPng,
+  slideBackgroundColor,
   SLIDE_HEIGHT,
   SLIDE_WIDTH,
   type BackgroundImage,
@@ -18,8 +20,11 @@ import {
 } from "../lib/unsplash";
 
 /**
- * Renders five sample posts into out/ so the PNGs can be eyeballed:
+ * Renders five sample posts into out/ as PNG to eyeball and as the JPEG that
+ * is actually uploaded, so its size can be checked against Instagram's 8 MB
+ * ceiling:
  *
+ *   out/short-text-1.jpg        the same slide as the uploaded JPEG
  *   out/short-text-1.png        one slide, no "1 / 1" indicator
  *   out/long-text-1..n.png      several proportional-font slides
  *   out/long-code-1..n.png      several monospace slides with line numbers
@@ -285,6 +290,16 @@ async function main(): Promise<void> {
       const file = path.join(OUT_DIR, `${sample.name}-${index + 1}.png`);
       await writeFile(file, png);
       console.log(`  ${path.relative(process.cwd(), file)} (${png.length} bytes)`);
+    }
+
+    // The JPEGs are the bytes the publishers upload, so these sizes are what
+    // has to stay under Instagram's 8 MB ceiling.
+    const background = slideBackgroundColor(split.contentType);
+    const jpegs = await Promise.all(pngs.map((png) => pngToJpeg(png, background)));
+    for (const [index, jpeg] of jpegs.entries()) {
+      const file = path.join(OUT_DIR, `${sample.name}-${index + 1}.jpg`);
+      await writeFile(file, jpeg);
+      console.log(`  ${path.relative(process.cwd(), file)} (${jpeg.length} bytes)`);
     }
   }
 }

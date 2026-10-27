@@ -54,7 +54,7 @@ config({ path: path.join(process.cwd(), ".env"), quiet: true });
  */
 export const SAMPLE_TEXT = `Every post in CodeSync Hub is written once and published everywhere. This one exists so the LinkedIn publisher can be exercised against the real API, with real slides, before the scheduler goes anywhere near a live account.
 
-The cards you are reading were split and rendered on your own machine a few seconds ago. Nothing was uploaded until the publisher asked for the images, and every slide is a fixed 1080 by 1350 pixel PNG.
+The cards you are reading were split and rendered on your own machine a few seconds ago. Nothing was uploaded until the publisher asked for the images, and every slide is a fixed 1080 by 1350 pixel JPEG.
 
 The first post below carries one image, because a single-image post is the path every LinkedIn app may take. The second run, with --multi, sends three, which uses the multi-image endpoint that not every app type is allowed to call.
 

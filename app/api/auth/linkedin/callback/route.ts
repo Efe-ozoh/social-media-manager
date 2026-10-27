@@ -3,6 +3,7 @@ import { getPrisma } from "@/lib/prisma";
 import {
   completeLinkedInConnection,
   getLinkedInConfig,
+  LINKEDIN_CALLBACK_PATH,
   LINKEDIN_STATE_COOKIE,
   LinkedInOAuthError,
   type LinkedInConnection,
@@ -40,7 +41,7 @@ export async function GET(request: NextRequest) {
       httpOnly: true,
       sameSite: "lax",
       secure: process.env.NODE_ENV === "production",
-      path: "/api/auth/linkedin",
+      path: LINKEDIN_CALLBACK_PATH,
       maxAge: 0,
     });
     return response;

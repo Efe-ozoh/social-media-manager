@@ -17,6 +17,11 @@ import {
 const POST_ID = "11111111-1111-4111-8111-111111111111";
 const BASE_URL = "http://localhost:3000";
 
+/** Instagram's documented ceiling for a feed image. */
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+/** "Well under" that ceiling: a 1080x1350 slide encodes to a few hundred KB. */
+const COMFORTABLE_IMAGE_BYTES = 2 * 1024 * 1024;
+
 const tempRoots: string[] = [];
 
 async function makeStore(): Promise<{ store: LocalDiskImageStore; root: string }> {
@@ -50,11 +55,13 @@ function post(overrides: Partial<RenderablePost> = {}): RenderablePost {
 class RecordingStore implements ImageStore {
   readonly kind = "local-disk" as const;
   readonly deleted: string[] = [];
+  readonly puts: { key: string; contentType?: string }[] = [];
 
   constructor(private readonly inner: ImageStore) {}
 
-  put(buffer: Buffer | Uint8Array, key: string): Promise<string> {
-    return this.inner.put(buffer, key);
+  put(buffer: Buffer | Uint8Array, key: string, contentType?: string): Promise<string> {
+    this.puts.push({ key, contentType });
+    return this.inner.put(buffer, key, contentType);
   }
 
   async delete(key: string): Promise<void> {
@@ -91,8 +98,9 @@ describe("renderPost", () => {
     "renders, uploads and returns post_media rows",
     async () => {
       const { store, root } = await makeStore();
+      const recording = new RecordingStore(store);
 
-      const result = await renderPost(post(), store);
+      const result = await renderPost(post(), recording);
 
       expect(result.media).toHaveLength(1);
       expect(result.background).toBe("solid");
@@ -103,15 +111,53 @@ describe("renderPost", () => {
       expect(row.width).toBe(1080);
       expect(row.height).toBe(1350);
       expect(row.url).toMatch(
-        new RegExp(`^${BASE_URL}/uploads/posts/${POST_ID}/[0-9a-f]{16}/slide-1\\.png$`),
+        new RegExp(`^${BASE_URL}/uploads/posts/${POST_ID}/[0-9a-f]{16}/slide-1\\.jpg$`),
       );
+
+      // The store is told to serve the slide as JPEG, and the bytes really are
+      // JPEG (FF D8 FF): this is the file Instagram downloads.
+      expect(recording.puts).toHaveLength(1);
+      expect(recording.puts[0].key.endsWith("/slide-1.jpg")).toBe(true);
+      expect(recording.puts[0].contentType).toBe("image/jpeg");
 
       const key = keyFromPublicUrl(row.url);
       expect(key).not.toBeNull();
       const bytes = await readFile(path.join(root, key as string));
-      expect(bytes.subarray(1, 4).toString()).toBe("PNG");
+      expect(bytes.subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
+      expect(bytes.byteLength).toBeLessThan(COMFORTABLE_IMAGE_BYTES);
+      expect(bytes.byteLength).toBeLessThan(MAX_IMAGE_BYTES);
     },
     30_000,
+  );
+
+  it(
+    "keeps every uploaded slide well under Instagram's 8 MB ceiling",
+    async () => {
+      const { store, root } = await makeStore();
+      // A dense code post is the largest slide the renderer can produce.
+      const denseCode = Array.from(
+        { length: 48 },
+        (_, index) =>
+          `export function handleRequest${index}(request: Request): Response { return json({ index: ${index}, ok: true }); }`,
+      ).join("\n");
+
+      const result = await renderPost(
+        post({ contentType: "code", code: denseCode, language: "typescript" }),
+        store,
+      );
+
+      expect(result.media.length).toBeGreaterThan(1);
+
+      for (const row of result.media) {
+        const key = keyFromPublicUrl(row.url) as string;
+        const bytes = await readFile(path.join(root, key));
+        expect(bytes.subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
+        // Instagram re-encodes what it downloads, so leave it far below the
+        // documented ceiling rather than merely underneath it.
+        expect(bytes.byteLength).toBeLessThan(COMFORTABLE_IMAGE_BYTES);
+      }
+    },
+    60_000,
   );
 
   it(
@@ -129,7 +175,7 @@ describe("renderPost", () => {
 
       const key = keyFromPublicUrl(first.media[0].url) as string;
       const dir = path.dirname(path.join(root, key));
-      expect(await readdir(dir)).toEqual(["slide-1.png"]);
+      expect(await readdir(dir)).toEqual(["slide-1.jpg"]);
     },
     30_000,
   );
@@ -172,8 +218,8 @@ describe("renderPost", () => {
     async () => {
       const { store, root } = await makeStore();
       const recording = new RecordingStore(store);
-      const foreign = `posts/22222222-2222-4222-8222-222222222222/abc/slide-1.png`;
-      const ownStale = `posts/${POST_ID}/stale/slide-9.png`;
+      const foreign = `posts/22222222-2222-4222-8222-222222222222/abc/slide-1.jpg`;
+      const ownStale = `posts/${POST_ID}/stale/slide-9.jpg`;
       await store.put(Buffer.from("foreign"), foreign);
       await store.put(Buffer.from("own"), ownStale);
 
@@ -237,7 +283,7 @@ describe("renderPost", () => {
 describe("deleteStaleImages", () => {
   it("deduplicates keys and is idempotent", async () => {
     const { store, root } = await makeStore();
-    const key = `posts/${POST_ID}/abc/slide-1.png`;
+    const key = `posts/${POST_ID}/abc/slide-1.jpg`;
     await store.put(Buffer.from("slide"), key);
 
     const first = await deleteStaleImages([key, key], store);
@@ -253,20 +299,20 @@ describe("deleteStaleImages", () => {
   it("reports failures instead of throwing, so a saved post stays saved", async () => {
     const store: ImageStore = {
       kind: "local-disk",
-      put: async () => `${BASE_URL}/uploads/x.png`,
+      put: async () => `${BASE_URL}/uploads/x.jpg`,
       delete: async (key) => {
-        if (key.endsWith("slide-2.png")) throw new Error("storage unavailable");
+        if (key.endsWith("slide-2.jpg")) throw new Error("storage unavailable");
       },
     };
 
     const result = await deleteStaleImages(
-      [`posts/${POST_ID}/abc/slide-1.png`, `posts/${POST_ID}/abc/slide-2.png`],
+      [`posts/${POST_ID}/abc/slide-1.jpg`, `posts/${POST_ID}/abc/slide-2.jpg`],
       store,
     );
 
-    expect(result.deleted).toEqual([`posts/${POST_ID}/abc/slide-1.png`]);
+    expect(result.deleted).toEqual([`posts/${POST_ID}/abc/slide-1.jpg`]);
     expect(result.failed).toEqual([
-      { key: `posts/${POST_ID}/abc/slide-2.png`, error: "storage unavailable" },
+      { key: `posts/${POST_ID}/abc/slide-2.jpg`, error: "storage unavailable" },
     ]);
   });
 });

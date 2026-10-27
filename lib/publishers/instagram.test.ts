@@ -133,7 +133,34 @@ describe("InstagramPublisher", () => {
     expect(publisher.maxCaptionLength).toBe(INSTAGRAM_MAX_CAPTION);
     expect(publisher.maxImages).toBe(INSTAGRAM_MAX_CAROUSEL_ITEMS);
     expect(INSTAGRAM_MAX_CAPTION).toBe(2_200);
-    expect(INSTAGRAM_MAX_CAROUSEL_ITEMS).toBe(10);
+    // The publishing guide and the media reference say 20; the error-code page
+    // is the outlier that still says 10.
+    expect(INSTAGRAM_MAX_CAROUSEL_ITEMS).toBe(20);
+  });
+
+  it("explains a carousel Instagram rejects as too large", async () => {
+    const clock = fakeClock();
+    const { fetchImpl } = mockFetch(() =>
+      json(
+        {
+          error: {
+            message: "Unsupported request - Please check the number of carousel items",
+            code: 9004,
+            error_subcode: 2207028,
+          },
+        },
+        400,
+      ),
+    );
+    const publisher = new InstagramPublisher({ fetchImpl, ...fastOptions(), ...clock });
+
+    const error = await publishError(publisher.publish(input()));
+
+    expect(error.code).toBe("validation");
+    expect(error.retryable).toBe(false);
+    // Both documented numbers, so the owner can see the docs disagree.
+    expect(error.message).toContain("20");
+    expect(error.message).toContain("10");
   });
 
   it("creates a container, waits for FINISHED, then publishes", async () => {
@@ -347,23 +374,27 @@ describe("InstagramPublisher", () => {
     expect(restrictedError.requiresReconnect).toBe(true);
   });
 
-  it("notes the JPEG requirement when the slides are PNG", async () => {
+  it("publishes the renderer's JPEG slides without a format note", async () => {
     const clock = fakeClock();
-    const png = mockFetch(healthyRoute());
-    const pngResult = await new InstagramPublisher({
-      fetchImpl: png.fetchImpl,
-      ...fastOptions(),
-      ...clock,
-    }).publish(input({ imageUrls: ["https://cdn.example.com/slide-1.png"] }));
-    expect(pngResult.notes?.[0]).toContain("JPEG");
-
     const jpeg = mockFetch(healthyRoute());
     const jpegResult = await new InstagramPublisher({
       fetchImpl: jpeg.fetchImpl,
       ...fastOptions(),
-      ...fakeClock(),
+      ...clock,
     }).publish(input({ imageUrls: ["https://cdn.example.com/slide-1.jpg"] }));
     expect(jpegResult.notes).toBeUndefined();
+    expect(jpegResult.externalPostId).toBeTruthy();
+
+    // The publisher no longer guesses the format from the file extension: the
+    // renderer decides it, and an unsupported format comes back from Meta as
+    // 2207005/36001, which meta-graph.ts maps to a clear message.
+    const png = mockFetch(healthyRoute());
+    const pngResult = await new InstagramPublisher({
+      fetchImpl: png.fetchImpl,
+      ...fastOptions(),
+      ...fakeClock(),
+    }).publish(input({ imageUrls: ["https://cdn.example.com/slide-1.png"] }));
+    expect(pngResult.notes).toBeUndefined();
   });
 
   it("fails when Meta returns no container or media id", async () => {
@@ -402,6 +433,9 @@ describe("InstagramPublisher", () => {
 
     expect(error.code).toBe("token_expired");
     expect(error.message).not.toContain(TOKEN);
+    // The detail is where an echoed token would surface, so check it too.
+    expect(error.detail).not.toContain(TOKEN);
+    expect(error.detail).toContain("[redacted token]");
     expect(JSON.stringify(error)).not.toContain(TOKEN);
   });
 

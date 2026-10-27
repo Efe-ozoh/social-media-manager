@@ -1,7 +1,7 @@
 /**
  * Post rendering and upload — SPEC section 8, "Rendering and storage".
  *
- * Renders a post's slides, uploads every PNG through an ImageStore, and
+ * Renders a post's slides, uploads every JPEG slide through an ImageStore, and
  * returns the rows that belong in post_media. Rendering happens once when a
  * post is created or edited, not on every publish attempt.
  *
@@ -21,8 +21,9 @@ import {
   type ImageStore,
 } from "./image-store";
 import {
-  renderSlidesPng,
+  renderSlidesJpeg,
   SLIDE_HEIGHT,
+  SLIDE_JPEG_CONTENT_TYPE,
   SLIDE_WIDTH,
   type BackgroundImage,
 } from "./renderer";
@@ -72,8 +73,12 @@ export type RenderPostResult = {
   staleKeys: string[];
 };
 
-/** Bumped when the splitter/renderer output changes, so old blobs get cleaned. */
-const RENDER_VERSION = 1;
+/**
+ * Bumped when the splitter/renderer output changes, so old blobs get cleaned.
+ * 2: slides are uploaded as JPEG (`.jpg`) instead of PNG, because Instagram
+ * documents JPEG as the only image format it accepts.
+ */
+const RENDER_VERSION = 2;
 
 /**
  * Renders and uploads one post. `store` is injected so tests (and callers
@@ -95,9 +100,10 @@ export async function renderPost(
   const slides = split.slides.slice(0, split.config.carouselCap);
 
   const background = await loadBackground(post);
-  const pngs =
+  // JPEG, not PNG: resvg can only emit PNG, and Instagram accepts JPEG only.
+  const jpegs =
     slides.length > 0
-      ? await renderSlidesPng(
+      ? await renderSlidesJpeg(
           { ...split, slides },
           { background, usePhotoBehindCode: options.usePhotoBehindCode },
         )
@@ -116,9 +122,9 @@ export async function renderPost(
   const uploadedUrls: string[] = [];
 
   try {
-    for (const [index, png] of pngs.entries()) {
-      const key = `${prefix}${fingerprint}/slide-${index + 1}.png`;
-      const url = await store.put(png, key);
+    for (const [index, jpeg] of jpegs.entries()) {
+      const key = `${prefix}${fingerprint}/slide-${index + 1}.jpg`;
+      const url = await store.put(jpeg, key, SLIDE_JPEG_CONTENT_TYPE);
       uploadedUrls.push(url);
       media.push({
         slideIndex: index,

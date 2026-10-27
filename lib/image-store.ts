@@ -8,6 +8,9 @@
  * Vercel Blob usage follows the current SDK (v2): `put(pathname, body, {
  * access: "public", addRandomSuffix: true })` gives every slide a random,
  * unguessable public URL, and `del()` accepts the stored pathname.
+ *
+ * Slides are uploaded as JPEG (`image/jpeg`), which is what the renderer
+ * produces and the only image format Instagram documents as accepted.
  */
 
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -21,9 +24,11 @@ export interface ImageStore {
   readonly kind: ImageStoreKind;
   /**
    * Uploads `buffer` under `key` and returns the public URL.
-   * `key` is a relative path such as `posts/<postId>/<hash>/slide-1.png`.
+   * `key` is a relative path such as `posts/<postId>/<hash>/slide-1.jpg`.
+   * `contentType` is what the object is served as; slides are JPEG, because
+   * that is the only image format the Meta publishers accept.
    */
-  put(buffer: Buffer | Uint8Array, key: string): Promise<string>;
+  put(buffer: Buffer | Uint8Array, key: string, contentType?: string): Promise<string>;
   /**
    * Deletes the object stored under `key`. Idempotent: a missing object is
    * not an error, so a retried cleanup can never fail a render.
@@ -36,6 +41,9 @@ export const LOCAL_UPLOAD_SEGMENT = "uploads";
 
 /** Host used by public Vercel Blob URLs. */
 const VERCEL_BLOB_HOST_SUFFIX = ".public.blob.vercel-storage.com";
+
+/** Uploads are slide images, so an unqualified put() gets the slide format. */
+export const DEFAULT_IMAGE_CONTENT_TYPE = "image/jpeg";
 
 const MAX_KEY_LENGTH = 240;
 const KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._\-/]*$/;
@@ -146,14 +154,18 @@ export class VercelBlobImageStore implements ImageStore {
 
   constructor(private readonly token?: string) {}
 
-  async put(buffer: Buffer | Uint8Array, key: string): Promise<string> {
+  async put(
+    buffer: Buffer | Uint8Array,
+    key: string,
+    contentType: string = DEFAULT_IMAGE_CONTENT_TYPE,
+  ): Promise<string> {
     // The SDK accepts Buffer; normalise anything else it might be handed.
     const body = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
     const blob = await put(sanitizeKey(key), body, {
       // SPEC: public slides, and an unguessable suffix on every upload.
       access: "public",
       addRandomSuffix: true,
-      contentType: "image/png",
+      contentType,
       token: this.token,
     });
     return blob.url;

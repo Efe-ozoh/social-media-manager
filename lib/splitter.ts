@@ -73,7 +73,7 @@ const STYLE_DEFAULTS: Record<
   Pick<ResolvedSplitterConfig, "fontSize" | "lineHeight" | "charAspectRatio">
 > = {
   code: { fontSize: 30, lineHeight: 44, charAspectRatio: 0.6 },
-  text: { fontSize: 44, lineHeight: 60, charAspectRatio: 0.5 },
+  text: { fontSize: 44, lineHeight: 60, charAspectRatio: 0.55 },
 };
 
 export type SplitInput = {

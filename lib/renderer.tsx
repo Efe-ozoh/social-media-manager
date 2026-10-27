@@ -340,6 +340,83 @@ function sniffImageMime(bytes: Uint8Array): string | null {
   return null;
 }
 
+/**
+ * Advance widths in em per character class, used only to bound the scaled font
+ * size. These are rough, but erring high is the safe direction: the bound is
+ * there to stop a line leaving the card, so an over-estimate costs a couple of
+ * pixels of type size and an under-estimate costs clipped text.
+ */
+const NARROW_GLYPHS = "iljtfr.,;:!'\"|()[]{}/\\`- ";
+const WIDE_GLYPHS = "MWmw@%&#";
+
+/** Estimated rendered width of `text`, in em. */
+export function lineEm(text: string): number {
+  let em = 0;
+  for (const char of text) {
+    if (NARROW_GLYPHS.includes(char)) em += 0.32;
+    else if (WIDE_GLYPHS.includes(char)) em += 0.95;
+    else if (char >= "0" && char <= "9") em += 0.62;
+    else if (char !== char.toLowerCase()) em += 0.72;
+    else em += 0.54;
+  }
+  return em;
+}
+
+/** Floor for the scaled size: text never gets smaller than this, because a
+ * slide that dense has already been split into more slides by the splitter. */
+export const TEXT_FONT_MIN = 36;
+/** Ceiling for the scaled size: a card with two lines should not turn into a
+ * billboard. */
+export const TEXT_FONT_MAX = 64;
+
+/**
+ * Text cards scale their font to how much text the slide carries: a slide with
+ * two lines is drawn larger than a nearly full one. Code cards keep the
+ * splitter's monospace size, because their breaks are exact character cuts
+ * rather than word wrapping, so their line lengths are already maximal.
+ *
+ * Exported bounds are the min and max of that scale.
+ *
+ * The growth is bounded by two things: the vertical room left on the slide,
+ * and the width of the longest line. That second bound is what keeps a
+ * scaled-up line inside the card. It can only bind below the base size for a
+ * line the splitter could not wrap (a single long token), and it is stricter
+ * than the splitter's flat `charAspectRatio` for wide glyph runs.
+ */
+export function computePerSlideFont(
+  slide: Slide,
+  isText: boolean,
+  config: ResolvedSplitterConfig,
+): number {
+  if (!isText) return config.fontSize;
+
+  const baseFont = config.fontSize;
+
+  // Vertical room: fewer lines on the slide => grow toward TEXT_FONT_MAX.
+  const linesPerSlide = Math.max(
+    1,
+    Math.floor((config.slideHeight - config.verticalPadding) / config.lineHeight),
+  );
+  const fillRatio = Math.min(1, (slide.lines.length || 1) / linesPerSlide);
+  const byHeight = Math.max(
+    TEXT_FONT_MIN,
+    baseFont + (TEXT_FONT_MAX - baseFont) * (1 - fillRatio),
+  );
+
+  // Horizontal room: the longest line must still fit the width. The splitter
+  // measures lines with one average ratio, which is honest for prose but
+  // optimistic for wide glyphs ("MMMMMMMM"), so the renderer bounds itself with
+  // a per-character estimate instead of a flat average.
+  const usableWidth =
+    config.slideWidth - config.horizontalPadding * 2 - config.lineNumberGutter;
+  const widestEm = slide.lines.reduce((max, line) => Math.max(max, lineEm(line.text)), 0);
+  const byWidth = widestEm > 0 ? usableWidth / widestEm : TEXT_FONT_MAX;
+
+  // Floor to an even size so rounding cannot push a line back over the edge.
+  const size = Math.min(TEXT_FONT_MAX, byHeight, byWidth);
+  return Math.max(2, Math.floor(size / 2) * 2);
+}
+
 function slideElement(
   input: SlideRenderInput,
   theme: SlideTheme,
@@ -352,7 +429,19 @@ function slideElement(
   const textShadow = usesPhoto ? PHOTO_TEXT_SHADOW : undefined;
   const credit = usesPhoto ? (input.background?.attribution?.name?.trim() ?? "") : "";
 
-  const padTop = config.verticalPadding / 2;
+  // Per-slide font size: text slides can grow when they have little text.
+  const fontSize = computePerSlideFont(slide, !isCode, config);
+  // Keep the config's own line-height ratio as the font scales.
+  const lineHeight = Math.round(fontSize * (config.lineHeight / config.fontSize));
+
+  const actualLinesOnSlide = Math.min(
+    slide.lines.length,
+    Math.floor((config.slideHeight - config.verticalPadding) / lineHeight),
+  );
+  const usedHeight = actualLinesOnSlide * lineHeight;
+  const remainingHeight = config.slideHeight - config.verticalPadding - usedHeight;
+  const verticalOffset = Math.max(0, Math.round(remainingHeight / 2));
+
   const padSide = config.horizontalPadding / 2;
   // Same usable width the splitter sized lines against.
   const usableWidth =
@@ -366,7 +455,7 @@ function slideElement(
       style={{
         display: "flex",
         flexDirection: "row",
-        height: config.lineHeight,
+        height: lineHeight,
         alignItems: "center",
       }}
     >
@@ -379,7 +468,7 @@ function slideElement(
             textAlign: "right",
             color: theme.muted,
             fontFamily: MONO_FAMILY,
-            fontSize: Math.round(config.fontSize * 0.75),
+            fontSize: Math.round(fontSize * 0.75),
             flexGrow: 0,
             flexShrink: 0,
             textShadow,
@@ -394,7 +483,7 @@ function slideElement(
         style={{
           whiteSpace: "pre",
           fontFamily: theme.fontFamily,
-          fontSize: config.fontSize,
+          fontSize,
           color: theme.foreground,
           flexShrink: 0,
           textShadow,
@@ -421,7 +510,7 @@ function slideElement(
         background: theme.background,
         color: theme.foreground,
         fontFamily: theme.fontFamily,
-        fontSize: config.fontSize,
+        fontSize,
         display: "flex",
         flexDirection: "column",
         boxSizing: "border-box",
@@ -465,7 +554,7 @@ function slideElement(
           flexDirection: "column",
           width: "100%",
           height: "100%",
-          padding: `${padTop}px ${padSide}px`,
+          padding: `${config.verticalPadding / 2}px ${padSide}px`,
           boxSizing: "border-box",
         }}
       >
@@ -475,6 +564,7 @@ function slideElement(
             flexDirection: "column",
             width: blockWidth,
             marginLeft: blockOffset,
+            marginTop: verticalOffset,
           }}
         >
           {rows}
@@ -488,8 +578,8 @@ function slideElement(
               bottom: 16,
               maxWidth: config.slideWidth - padSide * 2 - 120,
               fontFamily: SANS_FAMILY,
-              fontSize: 22,
-              color: theme.muted,
+              fontSize: 24,
+              color: theme.foreground,
               textShadow,
             }}
           >
@@ -503,8 +593,9 @@ function slideElement(
               right: padSide,
               bottom: 16,
               fontFamily: MONO_FAMILY,
-              fontSize: 24,
-              color: theme.muted,
+              fontSize: 32,
+              fontWeight: 700,
+              color: theme.foreground,
               textShadow,
             }}
           >

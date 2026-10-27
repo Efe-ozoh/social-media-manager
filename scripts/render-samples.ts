@@ -33,6 +33,9 @@ import {
  * Run with: npm run render:samples
  *
  * This is a preview: it never calls Unsplash's download-tracking endpoint.
+ *
+ * Text slides are split at a nominal 44px, and the renderer then scales each
+ * slide's font up (toward 64px) when that slide holds little text.
  */
 
 const OUT_DIR = path.resolve("out");

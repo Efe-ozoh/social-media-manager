@@ -8,6 +8,7 @@ import {
   MetaOAuthError,
   type MetaConnection,
 } from "@/lib/publishers/meta-oauth";
+import { isMetaEnabled } from "@/lib/platforms";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,6 +29,9 @@ export const dynamic = "force-dynamic";
  * Every failure lands on a short reason code from MetaOAuthErrorCode.
  *
  * No code, token or app secret is ever logged.
+ *
+ * Meta posting is switched off unless ENABLE_META is an explicit yes, so a
+ * callback that arrives while it is off stores nothing and says so.
  */
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
@@ -59,6 +63,13 @@ export async function GET(request: NextRequest) {
     });
     return response;
   };
+
+  // Before anything else, and before the state check: a disabled install must
+  // never write a social_accounts row, whatever arrives here.
+  if (!isMetaEnabled()) {
+    console.warn("[meta] Callback ignored: set ENABLE_META=true to enable Meta posting again.");
+    return finish("error", "disabled");
+  }
 
   let config;
   try {

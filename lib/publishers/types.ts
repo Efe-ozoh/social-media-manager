@@ -11,8 +11,11 @@
  */
 
 import { decryptToken } from "@/lib/crypto";
+import type { PlatformName } from "@/lib/platforms";
 
-export type PlatformName = "linkedin" | "facebook" | "instagram";
+// The platform list lives in one place (lib/platforms.ts), so the publisher
+// contract, the scheduler and the UI cannot drift apart.
+export type { PlatformName };
 
 /** A social_accounts row with its token already decrypted, in memory only. */
 export type SocialAccount = {
@@ -228,6 +231,8 @@ export function redactSecrets(text: string): string {
     .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
     .replace(/\bAQ[A-Za-z0-9_-]{20,}\b/g, "[redacted token]")
     .replace(/\bEAA[A-Za-z0-9_-]{16,}\b/g, "[redacted token]")
+    // Telegram bot tokens look like 123456789:AAH...
+    .replace(/\b\d{6,}:[A-Za-z0-9_-]{30,}\b/g, "[redacted token]")
     .slice(0, 300);
 }
 

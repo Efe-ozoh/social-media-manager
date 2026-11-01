@@ -6,6 +6,8 @@
  *   npx tsx scripts/publish-test.ts --facebook             a Facebook Page post
  *   npx tsx scripts/publish-test.ts --instagram --multi    Instagram, then three
  *   npx tsx scripts/publish-test.ts --facebook --instagram both Meta platforms
+ *   npx tsx scripts/publish-test.ts --telegram             the Telegram channel
+ *   npx tsx scripts/publish-test.ts --telegram --multi     Telegram, then three
  *
  * With no platform flag it publishes to LinkedIn, which is what this script
  * did when only LinkedIn was implemented.
@@ -22,7 +24,13 @@
  *
  * Facebook and Instagram fetch the images from their own servers, so they need
  * public HTTPS slide URLs; with the local disk store this script says so and
- * stops. LinkedIn uploads the bytes itself, so localhost URLs work there.
+ * stops. LinkedIn and Telegram upload the bytes themselves, so localhost URLs
+ * work there.
+ *
+ * Telegram is configured by environment variables rather than OAuth: this
+ * script checks the bot token with getMe and the channel with getChat, prints
+ * only the bot username and the channel title, then publishes. A --telegram
+ * run needs no database at all.
  *
  * It prints each post's URN or media id and any notes. It never prints a
  * token: the token is decrypted into memory, handed to the publisher and
@@ -64,18 +72,20 @@ Line numbers, syntax colours and the slide footer appear on code cards, so a rea
 
 Delete both test posts from your feed when you are done. They are markers, not content: the point was to prove that the stored token, the render and the upload line up, and that is now either true or plainly not.`;
 
-type TestPlatform = "linkedin" | "facebook" | "instagram";
+type TestPlatform = "linkedin" | "facebook" | "instagram" | "telegram";
 
 const PLATFORM_LABELS: Record<TestPlatform, string> = {
   linkedin: "LinkedIn",
   facebook: "Facebook Page",
   instagram: "Instagram",
+  telegram: "Telegram",
 };
 
 const PLATFORM_FLAGS: Record<string, TestPlatform> = {
   "--linkedin": "linkedin",
   "--facebook": "facebook",
   "--instagram": "instagram",
+  "--telegram": "telegram",
 };
 
 /** Every caption says it is a test, so the posts are obvious in a feed. */
@@ -108,6 +118,14 @@ function appUrl(): string {
 }
 
 function connectHints(platform: TestPlatform): string[] {
+  if (platform === "telegram") {
+    return [
+      "Telegram needs no OAuth: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID in .env.local.",
+      'Create the bot with @BotFather (/newbot), then add it to the channel as an administrator with "Post messages".',
+      "TELEGRAM_CHANNEL_ID is the numeric channel id (-100...) or @channelusername.",
+    ];
+  }
+
   if (platform === "linkedin") {
     return [
       `Connect the account: ${appUrl()}/api/auth/linkedin/start (sign in to the app first).`,
@@ -157,11 +175,12 @@ function parseArgs(argv: string[]): { multi: boolean; platforms: TestPlatform[] 
     const platform = PLATFORM_FLAGS[arg];
     if (!platform) {
       throw new TestError(`Unknown argument: ${arg}`, [
-        "Usage: npx tsx scripts/publish-test.ts [--linkedin|--facebook|--instagram] [--multi]",
+        "Usage: npx tsx scripts/publish-test.ts [--linkedin|--facebook|--instagram|--telegram] [--multi]",
         "  (no platform flag)  publish to LinkedIn",
         "  --linkedin          publish to the connected LinkedIn member",
         "  --facebook          publish to the connected Facebook Page",
         "  --instagram         publish to the connected Instagram account",
+        "  --telegram          publish to the channel in TELEGRAM_CHANNEL_ID",
         "  --multi             also publish the first three slides as a carousel",
       ]);
     }
@@ -178,6 +197,11 @@ function parseArgs(argv: string[]): { multi: boolean; platforms: TestPlatform[] 
  * fresh reconnect is picked up.
  */
 async function loadAccount(platform: TestPlatform): Promise<SocialAccount> {
+  if (platform === "telegram") {
+    // Telegram is env-configured; telegramAccount() is used instead.
+    throw new TestError("Telegram is configured by environment variables, not social_accounts.");
+  }
+
   if (!process.env.DATABASE_URL?.trim()) {
     throw new TestError("DATABASE_URL is not set, so the connected account cannot be read.", [
       "Add DATABASE_URL to .env.local, then run \"npm run db:migrate\".",
@@ -249,6 +273,42 @@ async function loadAccount(platform: TestPlatform): Promise<SocialAccount> {
   return account;
 }
 
+/**
+ * Telegram is configured by env, not by a stored connection, so this checks the
+ * token with getMe and the channel with getChat and returns an account the
+ * publisher can carry. Only the bot username and the channel title are printed.
+ */
+async function telegramAccount(): Promise<SocialAccount> {
+  const { getTelegramConfig, telegramPublisher, TelegramConfigError } = await import(
+    "../lib/publishers/telegram"
+  );
+
+  let config;
+  try {
+    config = getTelegramConfig();
+  } catch (error) {
+    if (error instanceof TelegramConfigError) {
+      throw new TestError(error.message, connectHints("telegram"));
+    }
+    throw error;
+  }
+
+  const target = await telegramPublisher.describeTarget();
+  console.log(`\nTelegram bot: ${target.botUsername ? `@${target.botUsername}` : target.botName}`);
+  console.log(`Telegram chat: ${target.chatTitle || config.chatId} (${target.chatType})`);
+
+  return {
+    id: "telegram-env",
+    platform: "telegram",
+    externalId: config.chatId,
+    displayName: target.chatTitle || config.chatId,
+    // The token travels in the Bot API URL, so the account carries no secret.
+    accessToken: "",
+    refreshToken: null,
+    expiresAt: null,
+  };
+}
+
 /** The publisher the dispatcher would use for this platform. */
 async function publisherFor(platform: TestPlatform): Promise<Publisher> {
   if (platform === "linkedin") {
@@ -258,6 +318,10 @@ async function publisherFor(platform: TestPlatform): Promise<Publisher> {
   if (platform === "facebook") {
     const { facebookPublisher } = await import("../lib/publishers/facebook");
     return facebookPublisher;
+  }
+  if (platform === "telegram") {
+    const { telegramPublisher } = await import("../lib/publishers/telegram");
+    return telegramPublisher;
   }
   const { instagramPublisher } = await import("../lib/publishers/instagram");
   return instagramPublisher;
@@ -360,7 +424,9 @@ async function main(): Promise<void> {
 
   // Meta fetches the slides itself, so a local disk store cannot work there.
   // Checked before rendering so the failure explains the fix, not a dead URL.
-  const metaPlatforms = options.platforms.filter((platform) => platform !== "linkedin");
+  const metaPlatforms = options.platforms.filter(
+    (platform) => platform !== "linkedin" && platform !== "telegram",
+  );
   if (metaPlatforms.length > 0) {
     const { createImageStore } = await import("../lib/image-store");
     if (createImageStore().kind === "local-disk") {
@@ -378,7 +444,10 @@ async function main(): Promise<void> {
   // Fail on a missing connection before spending time rendering.
   const accounts = new Map<TestPlatform, SocialAccount>();
   for (const platform of options.platforms) {
-    accounts.set(platform, await loadAccount(platform));
+    accounts.set(
+      platform,
+      platform === "telegram" ? await telegramAccount() : await loadAccount(platform),
+    );
   }
 
   const carousel = await prepareCarousel();

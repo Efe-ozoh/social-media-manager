@@ -14,6 +14,9 @@ enum Platform {
   linkedin
   facebook
   instagram
+  // Added in 0003: the manual_export platforms (facebook, instagram) stay in
+  // the model even while ENABLE_META is off — see lib/platforms.ts.
+  telegram
 
   @@map("platform")
 }

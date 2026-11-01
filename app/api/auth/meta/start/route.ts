@@ -9,6 +9,7 @@ import {
   MetaOAuthError,
   type MetaConfig,
 } from "@/lib/publishers/meta-oauth";
+import { isMetaEnabled } from "@/lib/platforms";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,8 +32,18 @@ function backToApp(request: NextRequest, reason: string) {
  *
  * The CSRF `state` lives in a short-lived httpOnly cookie scoped to the
  * callback path and is compared there.
+ *
+ * Meta automated posting is switched off, so unless ENABLE_META is an explicit
+ * yes this answers with reason=disabled and starts nothing. The code below is
+ * kept for when the flag is turned back on; Facebook and Instagram are
+ * manual-export platforms meanwhile (lib/platforms.ts).
  */
 export async function GET(request: NextRequest) {
+  if (!isMetaEnabled()) {
+    console.warn("[meta] Connect disabled: set ENABLE_META=true to enable Meta posting again.");
+    return backToApp(request, "disabled");
+  }
+
   let config: MetaConfig;
   try {
     config = getMetaConfig();

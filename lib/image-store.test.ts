@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createImageStore,
   keyFromPublicUrl,
+  localUploadKeyFromUrl,
+  localUploadPath,
   LocalDiskImageStore,
   sanitizeKey,
 } from "./image-store";
@@ -116,5 +118,39 @@ describe("keyFromPublicUrl", () => {
   it("rejects traversal hidden in a URL", () => {
     expect(keyFromPublicUrl("http://localhost:3000/uploads/../secret.png")).toBeNull();
     expect(keyFromPublicUrl("http://localhost:3000/uploads/%2e%2e/secret.png")).toBeNull();
+  });
+});
+
+describe("localUploadKeyFromUrl", () => {
+  it("recovers a key only from local-store URLs", () => {
+    expect(
+      localUploadKeyFromUrl("http://localhost:3000/uploads/posts/p1/abc/slide-1.jpg"),
+    ).toBe("posts/p1/abc/slide-1.jpg");
+
+    expect(
+      localUploadKeyFromUrl(
+        "https://store123.public.blob.vercel-storage.com/posts/p1/abc/slide-1.jpg",
+      ),
+    ).toBeNull();
+    expect(localUploadKeyFromUrl("https://example.com/posts/p1/slide-1.jpg")).toBeNull();
+    expect(localUploadKeyFromUrl("not a url")).toBeNull();
+  });
+
+  it("rejects traversal and non-http URLs instead of mapping them to disk", () => {
+    expect(localUploadKeyFromUrl("http://localhost:3000/uploads/../secret.png")).toBeNull();
+    expect(localUploadKeyFromUrl("http://localhost:3000/uploads/%2e%2e/secret.png")).toBeNull();
+    expect(localUploadKeyFromUrl("file:///uploads/posts/p1/slide-1.jpg")).toBeNull();
+  });
+});
+
+describe("localUploadPath", () => {
+  it("maps a key inside the configured upload root and rejects escapes", async () => {
+    const root = await makeTempRoot();
+
+    expect(localUploadPath("posts/p1/slide-1.jpg", { root })).toBe(
+      path.join(root, "posts/p1/slide-1.jpg"),
+    );
+    expect(() => localUploadPath("../secret.png", { root })).toThrow();
+    expect(() => localUploadPath("a\\b.png", { root })).toThrow();
   });
 });

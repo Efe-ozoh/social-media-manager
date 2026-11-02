@@ -71,6 +71,53 @@ export function sanitizeKey(key: string): string {
 }
 
 /**
+ * Recovers the key from a URL the local disk backend produced. Returns null
+ * for every other URL, including Vercel Blob URLs, so callers can decide
+ * whether a slide can be read from disk or has to be fetched over HTTP.
+ */
+export function localUploadKeyFromUrl(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
+  } catch {
+    return null;
+  }
+  if (!pathname.startsWith(`${LOCAL_UPLOAD_SEGMENT}/`)) return null;
+
+  try {
+    return sanitizeKey(pathname.slice(LOCAL_UPLOAD_SEGMENT.length + 1));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Maps a storage key to a file inside the local upload root. The same
+ * traversal guard the store uses on write is applied here on read.
+ */
+export function localUploadPath(
+  key: string,
+  options: { root?: string } = {},
+): string {
+  const root = path.resolve(
+    options.root ?? path.join(process.cwd(), "public", LOCAL_UPLOAD_SEGMENT),
+  );
+  const file = path.resolve(root, sanitizeKey(key));
+  if (!file.startsWith(`${root}${path.sep}`)) {
+    throw new Error("image key resolves outside the upload directory");
+  }
+  return file;
+}
+
+/**
  * Recovers the storage key from a public URL this module produced, so a
  * re-render can delete what the previous render uploaded. Returns null for
  * URLs that are not ours.
@@ -90,19 +137,15 @@ export function keyFromPublicUrl(url: string): string | null {
     return null;
   }
 
-  let key: string | null = null;
   if (parsed.protocol === "https:" && parsed.hostname.endsWith(VERCEL_BLOB_HOST_SUFFIX)) {
-    key = pathname;
-  } else if (pathname.startsWith(`${LOCAL_UPLOAD_SEGMENT}/`)) {
-    key = pathname.slice(LOCAL_UPLOAD_SEGMENT.length + 1);
+    try {
+      return sanitizeKey(pathname);
+    } catch {
+      return null;
+    }
   }
-  if (key === null) return null;
 
-  try {
-    return sanitizeKey(key);
-  } catch {
-    return null;
-  }
+  return localUploadKeyFromUrl(url);
 }
 
 /**
@@ -140,11 +183,7 @@ export class LocalDiskImageStore implements ImageStore {
   }
 
   private resolve(safeKey: string): string {
-    const file = path.resolve(this.root, safeKey);
-    if (!file.startsWith(`${this.root}${path.sep}`)) {
-      throw new Error("image key resolves outside the upload directory");
-    }
-    return file;
+    return localUploadPath(safeKey, { root: this.root });
   }
 }
 

@@ -329,9 +329,8 @@ async function publisherFor(platform: TestPlatform): Promise<Publisher> {
 
 /**
  * The local disk store serves slides from APP_URL, so the app has to be
- * running for the publisher to download them. Only LinkedIn can use those
- * URLs — it uploads the bytes itself — and main() refuses Facebook and
- * Instagram before reaching this point when the store is local.
+ * running for a publisher that fetches the slide URL. main() refuses Facebook
+ * and Instagram before reaching this point when the store is local.
  */
 async function assertSlidesReachable(urls: string[]): Promise<void> {
   for (const url of urls) {
@@ -363,11 +362,24 @@ async function assertSlidesReachable(urls: string[]): Promise<void> {
 }
 
 /**
+ * Telegram uploads the image bytes directly, so a --telegram-only run does not
+ * need the slide URL probe. Any other target fetches from a URL, so the check
+ * stays on when one is selected alongside Telegram.
+ */
+export function shouldCheckSlideReachability(
+  platforms: readonly TestPlatform[],
+): boolean {
+  return !(platforms.length === 1 && platforms[0] === "telegram");
+}
+
+/**
  * Renders the sample through the real renderer and image store, so what gets
  * published is exactly what a real post would publish. Exported so this step
  * can be checked on its own, with no connected account.
  */
-export async function prepareCarousel(): Promise<{
+export async function prepareCarousel(
+  targetPlatforms: readonly TestPlatform[] = ["linkedin"],
+): Promise<{
   media: PostMediaRow[];
   slideCount: number;
   renderedSlideCount: number;
@@ -409,7 +421,11 @@ export async function prepareCarousel(): Promise<{
   for (const row of render.media) {
     console.log(`  slide ${row.slideIndex + 1}: ${row.url}`);
   }
-  await assertSlidesReachable(render.media.map((row) => row.url));
+  if (shouldCheckSlideReachability(targetPlatforms)) {
+    await assertSlidesReachable(render.media.map((row) => row.url));
+  } else {
+    console.log("Skipping the slide reachability check for a Telegram-only run.");
+  }
 
   return {
     media: render.media,
@@ -450,7 +466,7 @@ async function main(): Promise<void> {
     );
   }
 
-  const carousel = await prepareCarousel();
+  const carousel = await prepareCarousel(options.platforms);
 
   if (options.multi && carousel.media.length < MULTI_SLIDE_COUNT) {
     throw new TestError(

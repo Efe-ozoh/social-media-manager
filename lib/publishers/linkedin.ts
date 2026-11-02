@@ -29,6 +29,7 @@
  * message only, after redaction, and never from request headers.
  */
 
+import { downloadSlide } from "./slide-download";
 import {
   PublishError,
   redactSecrets,
@@ -61,6 +62,8 @@ export type LinkedInPublisherOptions = {
   /** Overrides LINKEDIN_API_VERSION, e.g. after a version sunset. */
   apiVersion?: string;
   timeoutMs?: number;
+  /** Test override for reading local-disk slides. */
+  localUploadRoot?: string;
 };
 
 type UploadedImage = { urn: string; altText: string };
@@ -119,11 +122,13 @@ export class LinkedInPublisher implements Publisher {
   private readonly fetchImpl: FetchImpl;
   private readonly apiVersion: string;
   private readonly timeoutMs: number;
+  private readonly localUploadRoot: string | undefined;
 
   constructor(options: LinkedInPublisherOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.apiVersion = options.apiVersion ?? LINKEDIN_API_VERSION;
     this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.localUploadRoot = options.localUploadRoot;
   }
 
   /** LinkedIn's self-service tokens cannot be refreshed; reconnect instead. */
@@ -253,35 +258,14 @@ export class LinkedInPublisher implements Publisher {
   }): Promise<UploadedImage> {
     const label = `Slide ${options.position}`;
 
-    // 1. Our own slide, fetched from the image store.
-    let download: Response;
-    try {
-      download = await this.fetchImpl(options.url, {
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-    } catch (error) {
-      throw PublishError.network(
-        "linkedin",
-        `${label} could not be downloaded from the image store. This will be retried.`,
-        error,
-      );
-    }
-    if (!download.ok) {
-      throw PublishError.fromStatus(
-        download.status,
-        `${label} could not be downloaded from the image store (HTTP ${download.status}).`,
-        { platform: "linkedin" },
-      );
-    }
-
-    const bytes = Buffer.from(await download.arrayBuffer());
-    if (bytes.length === 0) {
-      throw new PublishError({
-        code: "provider_error",
-        platform: "linkedin",
-        message: `${label} downloaded as an empty file. This will be retried.`,
-      });
-    }
+    // 1. Our own slide: read it from local disk, or fetch a Blob URL.
+    const { bytes } = await downloadSlide(options.url, {
+      platform: "linkedin",
+      label,
+      fetchImpl: this.fetchImpl,
+      timeoutMs: this.timeoutMs,
+      localUploadRoot: this.localUploadRoot,
+    });
 
     // 2. Register the upload and get a presigned URL plus the image URN.
     const init = await this.send(

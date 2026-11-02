@@ -42,6 +42,7 @@
  * an error's `cause`.
  */
 
+import { downloadSlide } from "./slide-download";
 import {
   PublishError,
   redactSecrets,
@@ -129,6 +130,8 @@ export type TelegramPublisherOptions = {
   /** api.telegram.org, or a self-hosted Bot API server. */
   apiOrigin?: string;
   timeoutMs?: number;
+  /** Test override for reading local-disk slides. */
+  localUploadRoot?: string;
 };
 
 function messageId(value: unknown): string | undefined {
@@ -290,38 +293,19 @@ export class TelegramPublisher implements Publisher {
     };
   }
 
-  /** Fetches the slides, so local disk and Vercel Blob both work. */
+  /** Reads local-disk slides directly and fetches everything else. */
   private async download(urls: string[]): Promise<Uint8Array[]> {
     return Promise.all(
       urls.map(async (url, index) => {
         const label = `Slide ${index + 1}`;
+        const { bytes } = await downloadSlide(url, {
+          platform: "telegram",
+          label,
+          fetchImpl: this.fetchImpl,
+          timeoutMs: this.timeoutMs,
+          localUploadRoot: this.options.localUploadRoot,
+        });
 
-        let response: Response;
-        try {
-          response = await this.fetchImpl(url, { signal: AbortSignal.timeout(this.timeoutMs) });
-        } catch {
-          throw PublishError.network(
-            "telegram",
-            `${label} could not be downloaded from the image store. This will be retried.`,
-          );
-        }
-
-        if (!response.ok) {
-          throw PublishError.fromStatus(
-            response.status,
-            `${label} could not be downloaded from the image store (HTTP ${response.status}).`,
-            { platform: "telegram" },
-          );
-        }
-
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        if (bytes.byteLength === 0) {
-          throw new PublishError({
-            code: "provider_error",
-            platform: "telegram",
-            message: `${label} downloaded as an empty file. This will be retried.`,
-          });
-        }
         if (bytes.byteLength > TELEGRAM_MAX_PHOTO_BYTES) {
           throw PublishError.validation(
             "telegram",

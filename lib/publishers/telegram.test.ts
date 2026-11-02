@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   escapeHtml,
   getTelegramConfig,
@@ -8,6 +11,7 @@ import {
   TELEGRAM_MAX_TEXT,
   TelegramConfigError,
   TelegramPublisher,
+  type TelegramPublisherOptions,
 } from "./telegram";
 import { PublishError, type PublishInput, type SocialAccount } from "./types";
 
@@ -21,6 +25,20 @@ const CHAT_ID = "-1001234567890";
 
 /** A tiny JPEG; the publisher only sniffs the first bytes. */
 const JPEG = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+
+const tempRoots: string[] = [];
+
+async function makeTempRoot(): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "codesync-telegram-"));
+  tempRoots.push(root);
+  return root;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
+});
 
 type Call = { url: string; init: RequestInit; body: FormData | string | null };
 
@@ -114,8 +132,15 @@ function input(overrides: Partial<PublishInput> = {}): PublishInput {
   };
 }
 
-function publisher(fetchImpl: typeof fetch): TelegramPublisher {
-  return new TelegramPublisher({ fetchImpl, config: { botToken: TOKEN, chatId: CHAT_ID } });
+function publisher(
+  fetchImpl: typeof fetch,
+  options: Pick<TelegramPublisherOptions, "localUploadRoot"> = {},
+): TelegramPublisher {
+  return new TelegramPublisher({
+    fetchImpl,
+    config: { botToken: TOKEN, chatId: CHAT_ID },
+    ...options,
+  });
 }
 
 const slide = (index: number) => `https://cdn.example.com/slide-${index}.jpg`;
@@ -251,17 +276,27 @@ describe("TelegramPublisher images", () => {
     expect(new Uint8Array(await (photo as Blob).arrayBuffer())).toEqual(JPEG);
   });
 
-  it("uploads bytes from a localhost URL, so local-disk storage works", async () => {
-    const localUrl = "http://localhost:3000/uploads/posts/p1/abc/slide-1.jpg";
+  it("reads a local-disk slide from disk without fetching it over HTTP", async () => {
+    const root = await makeTempRoot();
+    const key = "posts/p1/abc/slide-1.jpg";
+    await mkdir(path.join(root, path.dirname(key)), { recursive: true });
+    await writeFile(path.join(root, key), JPEG);
+
+    const localUrl = `http://localhost:3000/uploads/${key}`;
     const { fetchImpl, calls } = mockFetch((call) =>
-      call.url === localUrl ? image() : ok({ message_id: 5 }),
+      methodOf(call) === "sendPhoto" ? ok({ message_id: 5 }) : undefined,
     );
 
-    const result = await publisher(fetchImpl).publish(input({ imageUrls: [localUrl] }));
+    const result = await publisher(fetchImpl, { localUploadRoot: root }).publish(
+      input({ imageUrls: [localUrl] }),
+    );
 
     expect(result.externalPostId).toBe("5");
-    expect(methodOf(calls[0])).toBe("slide-1.jpg");
-    expect(methodOf(calls[1])).toBe("sendPhoto");
+    // Only the Bot API call: the slide URL itself was never fetched.
+    expect(calls).toHaveLength(1);
+    expect(methodOf(calls[0])).toBe("sendPhoto");
+    const photo = formOf(calls[0]).get("photo") as Blob;
+    expect(new Uint8Array(await photo.arrayBuffer())).toEqual(JPEG);
   });
 
   it("sends the images and the text separately when the caption exceeds 1024", async () => {

@@ -1,15 +1,17 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE, verifySessionToken } from "@/lib/session";
 
-// Everything requires login except the login page, the login endpoint and the
-// platform OAuth callbacks (SPEC section 12). A callback is protected by its
-// own one-shot `state` cookie, and the browser arrives from the provider as a
-// top-level navigation. The cron endpoint joins this list in Phase 4.
+// Everything requires login except the login page, the login endpoint, the
+// platform OAuth callbacks and the cron endpoint (SPEC section 12). A callback
+// is protected by its own one-shot `state` cookie, and the browser arrives
+// from the provider as a top-level navigation. The cron route is protected by
+// its own CRON_SECRET check instead (lib/cron-auth.ts).
 const PUBLIC_PATHS = [
   "/login",
   "/api/auth/login",
   "/api/auth/linkedin/callback",
   "/api/auth/meta/callback",
+  "/api/cron/dispatch",
 ];
 
 export async function proxy(request: NextRequest) {

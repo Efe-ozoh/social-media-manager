@@ -48,6 +48,11 @@ describe("cron secret check", () => {
 });
 
 describe("POST /api/cron/dispatch", () => {
+  it("declares a 120-second maximum duration", async () => {
+    const { maxDuration } = await import("@/app/api/cron/dispatch/route");
+    expect(maxDuration).toBe(120);
+  });
+
   it("returns 401 when the secret is wrong or missing", async () => {
     process.env.CRON_SECRET = "expected-secret";
     const { POST } = await import("@/app/api/cron/dispatch/route");

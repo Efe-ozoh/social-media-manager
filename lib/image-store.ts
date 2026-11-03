@@ -99,6 +99,12 @@ export function localUploadKeyFromUrl(url: string): string | null {
   }
 }
 
+function localUploadRoot(root?: string): string {
+  return root
+    ? path.resolve(/*turbopackIgnore: true*/ root)
+    : path.join(process.cwd(), "public", LOCAL_UPLOAD_SEGMENT);
+}
+
 /**
  * Maps a storage key to a file inside the local upload root. The same
  * traversal guard the store uses on write is applied here on read.
@@ -107,10 +113,8 @@ export function localUploadPath(
   key: string,
   options: { root?: string } = {},
 ): string {
-  const root = path.resolve(
-    options.root ?? path.join(process.cwd(), "public", LOCAL_UPLOAD_SEGMENT),
-  );
-  const file = path.resolve(root, sanitizeKey(key));
+  const root = localUploadRoot(options.root);
+  const file = path.join(root, sanitizeKey(key));
   if (!file.startsWith(`${root}${path.sep}`)) {
     throw new Error("image key resolves outside the upload directory");
   }
@@ -160,9 +164,7 @@ export class LocalDiskImageStore implements ImageStore {
   private readonly baseUrl: string;
 
   constructor(options: { root?: string; baseUrl?: string } = {}) {
-    this.root = path.resolve(
-      options.root ?? path.join(process.cwd(), "public", LOCAL_UPLOAD_SEGMENT),
-    );
+    this.root = localUploadRoot(options.root);
     this.baseUrl = (options.baseUrl ?? process.env.APP_URL ?? "http://localhost:3000").replace(
       /\/+$/,
       "",

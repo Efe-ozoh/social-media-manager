@@ -2,9 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   computePostStatus,
   createPrismaDispatchStore,
+  cronBatchLimit,
+  DEFAULT_CRON_BATCH_LIMIT,
+  DISPATCH_TIME_BUDGET_MS,
   dispatchDue,
   MAX_ATTEMPTS,
+  MAX_CRON_BATCH_LIMIT,
   MAX_RETRIES,
+  MIN_CRON_BATCH_LIMIT,
   STUCK_TARGET_MS,
   type ClaimedTarget,
   type DispatchStore,
@@ -233,6 +238,29 @@ describe("computePostStatus", () => {
   });
 });
 
+describe("cronBatchLimit", () => {
+  it("defaults to 3 and honours a valid override", () => {
+    expect(DEFAULT_CRON_BATCH_LIMIT).toBe(3);
+    expect(cronBatchLimit({})).toBe(3);
+    expect(cronBatchLimit({ CRON_BATCH_LIMIT: "5" })).toBe(5);
+  });
+
+  it("clamps values and falls back for invalid input", () => {
+    expect(cronBatchLimit({ CRON_BATCH_LIMIT: "0" })).toBe(
+      MIN_CRON_BATCH_LIMIT,
+    );
+    expect(cronBatchLimit({ CRON_BATCH_LIMIT: "99" })).toBe(
+      MAX_CRON_BATCH_LIMIT,
+    );
+    expect(cronBatchLimit({ CRON_BATCH_LIMIT: "many" })).toBe(
+      DEFAULT_CRON_BATCH_LIMIT,
+    );
+    expect(cronBatchLimit({ CRON_BATCH_LIMIT: "3.5" })).toBe(
+      DEFAULT_CRON_BATCH_LIMIT,
+    );
+  });
+});
+
 describe("dispatchDue", () => {
 
   it("claims in one transaction with FOR UPDATE SKIP LOCKED", async () => {
@@ -276,6 +304,57 @@ describe("dispatchDue", () => {
     expect(first.claimed + second.claimed).toBe(1);
     expect(store.targets.get("target-1")?.status).toBe("published");
     expect(store.posts.get("post-1")?.status).toBe("published");
+  });
+
+  it("claims at most the default batch size of 3", async () => {
+    const store = new FakeStore();
+    store.addPost("post-1");
+    for (let index = 1; index <= 4; index += 1) {
+      store.addTarget(`target-${index}`, "post-1");
+    }
+
+    const publish = vi.fn(async () => ({
+      externalPostId: "telegram-123",
+      publishedAt: NOW,
+    }));
+    const summary = await dispatchDue({
+      store,
+      publishers: { telegram: publisher("telegram", publish) },
+      env: ENV,
+      now: NOW,
+    });
+
+    expect(summary.claimed).toBe(3);
+    expect(summary.published).toBe(3);
+    expect(store.targets.get("target-4")?.status).toBe("pending");
+  });
+
+  it("stops claiming once the time budget is spent", async () => {
+    const store = new FakeStore();
+    store.addPost("post-1");
+    store.addTarget("target-1", "post-1");
+    store.addTarget("target-2", "post-1");
+    store.addTarget("target-3", "post-1");
+
+    let elapsed = 0;
+    const publish = vi.fn(async () => {
+      elapsed = DISPATCH_TIME_BUDGET_MS + 1;
+      return { externalPostId: "telegram-123", publishedAt: NOW };
+    });
+
+    const summary = await dispatchDue({
+      store,
+      publishers: { telegram: publisher("telegram", publish) },
+      env: ENV,
+      now: NOW,
+      limit: 3,
+      clock: () => elapsed,
+    });
+
+    expect(summary.claimed).toBe(1);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(store.targets.get("target-2")?.status).toBe("pending");
+    expect(store.targets.get("target-3")?.status).toBe("pending");
   });
 
   it("retries after 1, 5 and 15 minutes, then fails", async () => {

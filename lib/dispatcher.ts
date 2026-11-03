@@ -53,7 +53,24 @@ export const RETRY_DELAYS_MINUTES = [1, 5, 15] as const;
 export const STUCK_TARGET_MS = 10 * 60 * 1000;
 /** Treat a token expiring within a minute as already gone. */
 const EXPIRY_SKEW_MS = 60_000;
-const DEFAULT_LIMIT = 25;
+
+export const DEFAULT_CRON_BATCH_LIMIT = 3;
+export const MIN_CRON_BATCH_LIMIT = 1;
+export const MAX_CRON_BATCH_LIMIT = 10;
+const MAX_DISPATCH_LIMIT = 100;
+export const DISPATCH_TIME_BUDGET_MS = 20_000;
+
+export function cronBatchLimit(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.CRON_BATCH_LIMIT?.trim();
+  if (!raw) return DEFAULT_CRON_BATCH_LIMIT;
+
+  const value = Number(raw);
+  if (!Number.isInteger(value)) return DEFAULT_CRON_BATCH_LIMIT;
+
+  return Math.min(MAX_CRON_BATCH_LIMIT, Math.max(MIN_CRON_BATCH_LIMIT, value));
+}
 
 export type ClaimedTarget = {
   targetId: string;
@@ -125,6 +142,8 @@ export type DispatchOptions = {
   env?: Record<string, string | undefined>;
   now?: Date;
   limit?: number;
+  timeBudgetMs?: number;
+  clock?: () => number;
   postId?: string;
   accountKey?: Buffer;
 };
@@ -353,8 +372,9 @@ async function loadAccount(
 }
 
 /**
- * Claims and publishes every due target. Runs are safe to overlap: the store
- * claims with FOR UPDATE SKIP LOCKED.
+ * Claims and publishes due targets one at a time until the batch limit or time
+ * budget is reached. Runs are safe to overlap: the store claims with FOR UPDATE
+ * SKIP LOCKED.
  */
 export async function dispatchDue(
   options: DispatchOptions = {},
@@ -363,21 +383,34 @@ export async function dispatchDue(
   const publishers = { ...DEFAULT_PUBLISHERS, ...options.publishers };
   const env = options.env ?? process.env;
   const now = options.now ?? new Date();
-  const limit = Math.max(1, Math.min(options.limit ?? DEFAULT_LIMIT, 100));
+  const limit = Math.max(
+    1,
+    Math.min(options.limit ?? DEFAULT_CRON_BATCH_LIMIT, MAX_DISPATCH_LIMIT),
+  );
+  const timeBudgetMs = Math.max(
+    0,
+    options.timeBudgetMs ?? DISPATCH_TIME_BUDGET_MS,
+  );
+  const clock = options.clock ?? Date.now;
+  const startedAt = clock();
 
   const recovered = await store.resetStuckTargets({
     cutoff: new Date(now.getTime() - STUCK_TARGET_MS),
     now,
   });
 
-  const claimed = await store.claimDueTargets({
-    now,
-    limit,
-    ...(options.postId ? { postId: options.postId } : {}),
-  });
-
   const results: DispatchResult[] = [];
-  for (const target of claimed) {
+  let claimed = 0;
+
+  while (claimed < limit && clock() - startedAt < timeBudgetMs) {
+    const [target] = await store.claimDueTargets({
+      now,
+      limit: 1,
+      ...(options.postId ? { postId: options.postId } : {}),
+    });
+    if (!target) break;
+
+    claimed += 1;
     let result: DispatchResult;
     try {
       result = await processTarget(
@@ -410,7 +443,7 @@ export async function dispatchDue(
 
   return {
     recovered,
-    claimed: claimed.length,
+    claimed,
     published: results.filter((result) => result.status === "published").length,
     retried: results.filter((result) => result.status === "retried").length,
     failed: results.filter((result) => result.status === "failed").length,

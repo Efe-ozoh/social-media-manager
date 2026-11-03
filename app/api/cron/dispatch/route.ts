@@ -4,10 +4,14 @@ import {
   getCronSecret,
   isCronSecretValid,
 } from "@/lib/cron-auth";
-import { dispatchDue } from "@/lib/dispatcher";
+import { cronBatchLimit, dispatchDue } from "@/lib/dispatcher";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// The 20s claim budget keeps normal runs short, but maxDuration is higher so a
+// slow upload that started just before the budget can finish instead of being
+// killed mid-publish.
+export const maxDuration = 120;
 
 /**
  * POST /api/cron/dispatch — called every minute by an external scheduler.
@@ -29,7 +33,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const summary = await dispatchDue();
+    const summary = await dispatchDue({ limit: cronBatchLimit() });
     return NextResponse.json(
       { ok: true, ...summary },
       { headers: { "Cache-Control": "no-store" } },

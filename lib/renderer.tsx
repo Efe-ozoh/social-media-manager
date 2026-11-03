@@ -160,6 +160,14 @@ function getFonts(): Promise<SatoriFont[]> {
   return fontsPromise;
 }
 
+export async function bundledFontsAvailable(): Promise<boolean> {
+  try {
+    return (await getFonts()).length === 4;
+  } catch {
+    return false;
+  }
+}
+
 const CODE_LANGS: BundledLanguage[] = [
   "typescript",
   "javascript",

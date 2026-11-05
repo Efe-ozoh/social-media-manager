@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { Resvg } from "@resvg/resvg-js";
 import sharp from "sharp";
-import { keyFromPublicUrl, VercelBlobImageStore } from "./image-store";
+import {
+  keyFromPublicUrl,
+  VercelBlobImageStore,
+  type ImageStore,
+} from "./image-store";
 import { getPrisma } from "./prisma";
 import { bundledFontsAvailable } from "./renderer";
 
@@ -112,8 +116,55 @@ async function checkFonts(): Promise<HealthCheck> {
   }
 }
 
+function errorClassName(error: unknown): string {
+  if (error instanceof Error && error.constructor.name) {
+    return error.constructor.name;
+  }
+  if (typeof error === "object" && error !== null) {
+    const name = (error as { constructor?: { name?: unknown } }).constructor?.name;
+    if (typeof name === "string" && name.length > 0) return name;
+  }
+  return "UnknownError";
+}
+
+function errorHttpStatus(
+  error: unknown,
+  seen: Set<unknown> = new Set(),
+): number | null {
+  if (typeof error !== "object" || error === null || seen.has(error)) {
+    return null;
+  }
+  seen.add(error);
+
+  const record = error as Record<string, unknown>;
+  for (const key of ["status", "statusCode"]) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isInteger(value)) return value;
+  }
+
+  const response = record.response;
+  if (typeof response === "object" && response !== null) {
+    const status = (response as Record<string, unknown>).status;
+    if (typeof status === "number" && Number.isInteger(status)) return status;
+  }
+
+  return errorHttpStatus(record.cause, seen);
+}
+
+type BlobHealthStore = Pick<ImageStore, "put" | "delete">;
+
+function failedBlobCheck(error: unknown): HealthCheck {
+  console.error("Blob health check failed.", {
+    errorClass: errorClassName(error),
+    httpStatus: errorHttpStatus(error),
+  });
+  return { ok: false, message: "Blob check failed." };
+}
+
 export async function checkBlob(
   env: Record<string, string | undefined> = process.env,
+  createStore: (token: string) => BlobHealthStore = (token) =>
+    new VercelBlobImageStore(token),
 ): Promise<HealthCheck> {
   const token = env.BLOB_READ_WRITE_TOKEN?.trim();
   if (!token) {
@@ -123,7 +174,7 @@ export async function checkBlob(
     };
   }
 
-  const store = new VercelBlobImageStore(token);
+  const store = createStore(token);
 
   try {
     const url = await store.put(
@@ -132,12 +183,12 @@ export async function checkBlob(
       "text/plain",
     );
     const key = keyFromPublicUrl(url);
-    if (!key) return { ok: false, message: "Blob check failed." };
+    if (!key) return failedBlobCheck(new Error("Blob URL is not recognized."));
 
     await store.delete(key);
     return { ok: true, message: "Blob write and delete succeeded." };
-  } catch {
-    return { ok: false, message: "Blob check failed." };
+  } catch (error) {
+    return failedBlobCheck(error);
   }
 }
 

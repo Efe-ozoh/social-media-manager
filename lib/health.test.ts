@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildHealthReport,
   checkBlob,
@@ -102,5 +102,43 @@ describe("checkBlob", () => {
       message: "Blob check skipped: BLOB_READ_WRITE_TOKEN is not set.",
     });
     expect(JSON.stringify(check)).not.toContain("BLOB_READ_WRITE_TOKEN=");
+  });
+
+  it("logs only the error class and HTTP status on failure", async () => {
+    class BlobHttpError extends Error {
+      readonly status = 503;
+    }
+
+    const secret = "blob-token-do-not-log";
+    const store = {
+      put: async () => {
+        throw new BlobHttpError(`request failed with ${secret}`);
+      },
+      delete: async () => {},
+    };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const check = await checkBlob(
+        { BLOB_READ_WRITE_TOKEN: secret },
+        () => store,
+      );
+
+      expect(check).toEqual({
+        ok: false,
+        message: "Blob check failed.",
+      });
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledWith("Blob health check failed.", {
+        errorClass: "BlobHttpError",
+        httpStatus: 503,
+      });
+
+      const logged = JSON.stringify(errorSpy.mock.calls);
+      expect(logged).not.toContain(secret);
+      expect(logged).not.toContain("request failed");
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

@@ -91,28 +91,78 @@ describe("buildHealthReport", () => {
     });
     expect(JSON.stringify(report)).not.toContain("do-not-leak-this-secret");
   });
+
+  it("adds BLOB_READ_WRITE_TOKEN to production env lists safely", async () => {
+    const token = "vercel_blob_rw_production-secret";
+    const report = await buildHealthReport({
+      env: {
+        ...allEnv(),
+        NODE_ENV: "production",
+        BLOB_READ_WRITE_TOKEN: token,
+      },
+      checks: okChecks,
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.env.present).toContain("BLOB_READ_WRITE_TOKEN");
+    expect(report.env.missing).toEqual([]);
+    expect(JSON.stringify(report)).not.toContain(token);
+  });
+
+  it("fails production health when BLOB_READ_WRITE_TOKEN is missing", async () => {
+    const report = await buildHealthReport({
+      env: { ...allEnv(), NODE_ENV: "production" },
+      checks: {
+        database: okChecks.database,
+        resvg: okChecks.resvg,
+        sharp: okChecks.sharp,
+        fonts: okChecks.fonts,
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.env.present).not.toContain("BLOB_READ_WRITE_TOKEN");
+    expect(report.env.missing).toContain("BLOB_READ_WRITE_TOKEN");
+    expect(report.checks.blob).toEqual({
+      ok: false,
+      message: "BLOB_READ_WRITE_TOKEN is not set",
+    });
+  });
 });
 
 describe("checkBlob", () => {
-  it("skips without a token and never reports the token value", async () => {
-    const check = await checkBlob({});
-
-    expect(check).toEqual({
+  it("reports a missing token distinctly and fails only in production", async () => {
+    expect(await checkBlob({})).toEqual({
       ok: true,
-      message: "Blob check skipped: BLOB_READ_WRITE_TOKEN is not set.",
+      message: "BLOB_READ_WRITE_TOKEN is not set",
     });
-    expect(JSON.stringify(check)).not.toContain("BLOB_READ_WRITE_TOKEN=");
+    expect(await checkBlob({ NODE_ENV: "development" })).toEqual({
+      ok: true,
+      message: "BLOB_READ_WRITE_TOKEN is not set",
+    });
+    expect(await checkBlob({ NODE_ENV: "production" })).toEqual({
+      ok: false,
+      message: "BLOB_READ_WRITE_TOKEN is not set",
+    });
   });
 
-  it("logs only the error class and HTTP status on failure", async () => {
+  it("logs a redacted summary without tokens or URLs", async () => {
     class BlobHttpError extends Error {
       readonly status = 503;
+
+      constructor(message: string) {
+        super(message);
+        this.name = "BlobHttpError";
+      }
     }
 
-    const secret = "blob-token-do-not-log";
+    const token = "vercel_blob_rw_abc123secret";
+    const otherToken = "vercel_blob_rw_zzz999secret";
+    const url = `https://blob.example.test/upload?token=${token}`;
+    const detail = `internal-detail-marker ${url} with ${otherToken} `;
     const store = {
       put: async () => {
-        throw new BlobHttpError(`request failed with ${secret}`);
+        throw new BlobHttpError(detail + "x".repeat(300));
       },
       delete: async () => {},
     };
@@ -120,7 +170,7 @@ describe("checkBlob", () => {
 
     try {
       const check = await checkBlob(
-        { BLOB_READ_WRITE_TOKEN: secret },
+        { BLOB_READ_WRITE_TOKEN: token },
         () => store,
       );
 
@@ -129,14 +179,58 @@ describe("checkBlob", () => {
         message: "Blob check failed.",
       });
       expect(errorSpy).toHaveBeenCalledTimes(1);
-      expect(errorSpy).toHaveBeenCalledWith("Blob health check failed.", {
-        errorClass: "BlobHttpError",
+
+      const summary = errorSpy.mock.calls[0]?.[1] as {
+        name?: string;
+        httpStatus?: number;
+        message: string;
+      };
+      expect(summary).toMatchObject({
+        name: "BlobHttpError",
         httpStatus: 503,
       });
+      expect(summary.message).toHaveLength(200);
+      expect(summary.message).toContain("[redacted]");
+      expect(summary.message).toContain("internal-detail-marker");
 
       const logged = JSON.stringify(errorSpy.mock.calls);
-      expect(logged).not.toContain(secret);
-      expect(logged).not.toContain("request failed");
+      const response = JSON.stringify(check);
+      for (const value of [token, otherToken, "https://", "blob.example.test"]) {
+        expect(logged).not.toContain(value);
+        expect(response).not.toContain(value);
+      }
+      expect(response).not.toContain("internal-detail-marker");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("omits a single-letter error name from the log", async () => {
+    class MinifiedError extends Error {
+      readonly status = 500;
+
+      constructor() {
+        super("minified failure");
+        this.name = "x";
+      }
+    }
+
+    const store = {
+      put: async () => {
+        throw new MinifiedError();
+      },
+      delete: async () => {},
+    };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      await checkBlob(
+        { BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_test" },
+        () => store,
+      );
+
+      const summary = errorSpy.mock.calls[0]?.[1] as { name?: string };
+      expect(summary.name).toBeUndefined();
     } finally {
       errorSpy.mockRestore();
     }

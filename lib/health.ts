@@ -116,15 +116,31 @@ async function checkFonts(): Promise<HealthCheck> {
   }
 }
 
-function errorClassName(error: unknown): string {
-  if (error instanceof Error && error.constructor.name) {
-    return error.constructor.name;
-  }
-  if (typeof error === "object" && error !== null) {
-    const name = (error as { constructor?: { name?: unknown } }).constructor?.name;
-    if (typeof name === "string" && name.length > 0) return name;
-  }
-  return "UnknownError";
+const BLOB_TOKEN_ENV = "BLOB_READ_WRITE_TOKEN";
+const LOG_MESSAGE_LIMIT = 200;
+const TOKEN_PATTERN = /vercel_blob_rw_\w+/g;
+const URL_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+
+function safeErrorName(error: unknown): string | undefined {
+  const name =
+    typeof error === "object" && error !== null
+      ? (error as { name?: unknown }).name
+      : undefined;
+  return typeof name === "string" && name.length > 1 ? name : undefined;
+}
+
+function safeErrorMessage(error: unknown): string {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+
+  return message
+    .replace(TOKEN_PATTERN, "[redacted]")
+    .replace(URL_PATTERN, "[redacted]")
+    .slice(0, LOG_MESSAGE_LIMIT);
 }
 
 function errorHttpStatus(
@@ -154,9 +170,13 @@ function errorHttpStatus(
 type BlobHealthStore = Pick<ImageStore, "put" | "delete">;
 
 function failedBlobCheck(error: unknown): HealthCheck {
+  const name = safeErrorName(error);
+  const httpStatus = errorHttpStatus(error);
+
   console.error("Blob health check failed.", {
-    errorClass: errorClassName(error),
-    httpStatus: errorHttpStatus(error),
+    ...(name ? { name } : {}),
+    ...(httpStatus !== null ? { httpStatus } : {}),
+    message: safeErrorMessage(error),
   });
   return { ok: false, message: "Blob check failed." };
 }
@@ -166,11 +186,11 @@ export async function checkBlob(
   createStore: (token: string) => BlobHealthStore = (token) =>
     new VercelBlobImageStore(token),
 ): Promise<HealthCheck> {
-  const token = env.BLOB_READ_WRITE_TOKEN?.trim();
+  const token = env[BLOB_TOKEN_ENV]?.trim();
   if (!token) {
     return {
-      ok: true,
-      message: "Blob check skipped: BLOB_READ_WRITE_TOKEN is not set.",
+      ok: env.NODE_ENV !== "production",
+      message: `${BLOB_TOKEN_ENV} is not set`,
     };
   }
 
@@ -222,9 +242,14 @@ export async function buildHealthReport(
   );
   const checks = Object.fromEntries(entries) as HealthChecks;
 
+  const envNames =
+    env.NODE_ENV === "production"
+      ? [...REQUIRED_ENV_NAMES, BLOB_TOKEN_ENV]
+      : REQUIRED_ENV_NAMES;
+
   const present: string[] = [];
   const missing: string[] = [];
-  for (const name of REQUIRED_ENV_NAMES) {
+  for (const name of envNames) {
     if (env[name]?.trim()) present.push(name);
     else missing.push(name);
   }

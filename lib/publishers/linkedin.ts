@@ -29,6 +29,7 @@
  * message only, after redaction, and never from request headers.
  */
 
+import { LINKEDIN_MAX_CAPTION } from "@/lib/publisher-limits";
 import { downloadSlide } from "./slide-download";
 import {
   PublishError,
@@ -46,8 +47,7 @@ export const LINKEDIN_REST_BASE = "https://api.linkedin.com/rest";
 export const LINKEDIN_POSTS_URL = `${LINKEDIN_REST_BASE}/posts`;
 export const LINKEDIN_IMAGES_URL = `${LINKEDIN_REST_BASE}/images?action=initializeUpload`;
 
-/** Documented post text limit. */
-export const LINKEDIN_MAX_CAPTION = 3_000;
+export { LINKEDIN_MAX_CAPTION } from "@/lib/publisher-limits";
 /** Documented multi-image range is 2–20; the splitter caps at 10 anyway. */
 export const LINKEDIN_MAX_IMAGES = 20;
 

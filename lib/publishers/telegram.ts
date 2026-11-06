@@ -42,6 +42,7 @@
  * an error's `cause`.
  */
 
+import { TELEGRAM_MAX_CAPTION, TELEGRAM_MAX_TEXT } from "@/lib/publisher-limits";
 import { downloadSlide } from "./slide-download";
 import {
   PublishError,
@@ -54,10 +55,7 @@ import {
 
 export const TELEGRAM_API_ORIGIN = "https://api.telegram.org";
 
-/** sendMessage: "Text of the message to be sent, 1-4096 characters". */
-export const TELEGRAM_MAX_TEXT = 4_096;
-/** sendPhoto / InputMediaPhoto: "0-1024 characters after entities parsing". */
-export const TELEGRAM_MAX_CAPTION = 1_024;
+export { TELEGRAM_MAX_TEXT, TELEGRAM_MAX_CAPTION } from "@/lib/publisher-limits";
 /** sendMediaGroup: "must include 2-10 items". */
 export const TELEGRAM_MIN_MEDIA_GROUP = 2;
 export const TELEGRAM_MAX_MEDIA_GROUP = 10;

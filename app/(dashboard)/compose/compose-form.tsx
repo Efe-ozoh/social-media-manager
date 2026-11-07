@@ -14,6 +14,7 @@ import {
   emptyComposeDraft,
   formatScheduleLabel,
   selectedPlatforms,
+  sharedCaptionLimit,
   utcToLocalDateTime,
   validateComposeDraft,
   zonedDateTimeToUtc,
@@ -24,6 +25,7 @@ import {
 } from "@/lib/compose-logic";
 import type { PlatformStatus } from "@/lib/platform-status";
 import { EMPTY_PREVIEW, SlidePreview, type PreviewState } from "./slide-preview";
+import { TextPreview } from "./text-preview";
 
 const LANGUAGE_OPTIONS = [
   { value: "", label: "Plain text" },
@@ -53,9 +55,23 @@ const CAROUSEL_OPTIONS = [
   { value: "off", label: "Off", hint: "Keep it to one slide" },
 ] as const;
 
+const FORMAT_OPTIONS = [
+  {
+    textOnly: false,
+    label: "With images",
+    hint: "Renders the text into slides and posts them with the caption.",
+  },
+  {
+    textOnly: true,
+    label: "Text only (no images)",
+    hint: "Publishes the caption as a plain text post. Nothing is rendered or stored.",
+  },
+] as const;
+
 type ApiPost = {
   id: string;
   bodyText: string;
+  textOnly: boolean;
   contentType: string;
   code: string | null;
   language: string | null;
@@ -108,6 +124,7 @@ function draftFromPost(post: ApiPost, timeZone: string): ComposeDraft {
 
   return {
     ...emptyComposeDraft(),
+    textOnly: post.textOnly === true,
     text: code,
     contentType: post.contentType === "code" ? "code" : "text",
     language: post.language ?? "",
@@ -272,7 +289,10 @@ export function ComposeForm({ postId }: { postId: string | null }) {
 
   const ready = statusLoaded && postLoaded;
   const dirty = baseline !== null && baseline !== draftFingerprint(draft);
+  // Text-only posts have no slides to render, so the preview endpoint is never
+  // called for them.
   const previewInputValid =
+    !draft.textOnly &&
     draft.text.trim() !== "" &&
     draft.text.length <= contentLimit(draft.contentType);
 
@@ -404,6 +424,9 @@ export function ComposeForm({ postId }: { postId: string | null }) {
 
   const currentTimeZone = timeZone;
   const editorLimit = contentLimit(draft.contentType);
+  const captionLimitShown = draft.textOnly
+    ? sharedCaptionLimit(draft)
+    : SHARED_CAPTION_LIMIT;
   const selected = selectedPlatforms(draft);
   const scheduleDate = draft.scheduleLocal
     ? zonedDateTimeToUtc(draft.scheduleLocal, currentTimeZone)
@@ -565,7 +588,7 @@ export function ComposeForm({ postId }: { postId: string | null }) {
             {savedPostId ? "Edit post" : "Compose"}
           </h1>
           <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-            Write once, preview the slides, then save, schedule or publish now.
+            Write once, check the preview, then save, schedule or publish now.
           </p>
         </div>
         <div className="flex items-center gap-3 text-xs text-zinc-500 dark:text-zinc-400">
@@ -584,9 +607,44 @@ export function ComposeForm({ postId }: { postId: string | null }) {
       <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(300px,380px)] lg:items-start">
         <div className="space-y-5">
           <Card
-            title="Content"
-            description="Text becomes the readable card; code becomes a syntax-highlighted monospace card."
+            title="Format"
+            description="Text-only posts publish the caption as plain text: no slide is rendered, stored or uploaded."
           >
+            <div
+              role="radiogroup"
+              aria-label="Post format"
+              className="grid gap-2 sm:grid-cols-2"
+            >
+              {FORMAT_OPTIONS.map((option) => (
+                <label
+                  key={option.label}
+                  className={`cursor-pointer rounded-lg border p-3 text-sm transition-colors ${
+                    draft.textOnly === option.textOnly
+                      ? "border-zinc-400 bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-800/50"
+                      : "border-zinc-200 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/30"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="format"
+                    checked={draft.textOnly === option.textOnly}
+                    onChange={() => update("textOnly", option.textOnly)}
+                    className="mr-2"
+                  />
+                  <span className="font-medium">{option.label}</span>
+                  <span className="mt-1 block pl-5 text-xs text-zinc-500 dark:text-zinc-400">
+                    {option.hint}
+                  </span>
+                </label>
+              ))}
+            </div>
+          </Card>
+
+          {!draft.textOnly ? (
+            <Card
+              title="Content"
+              description="Text becomes the readable card; code becomes a syntax-highlighted monospace card."
+            >
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <div
                 role="group"
@@ -677,34 +735,55 @@ export function ComposeForm({ postId }: { postId: string | null }) {
                 {editorLimit.toLocaleString("en-US")}
               </p>
             </div>
-          </Card>
+            </Card>
+          ) : null}
 
           <Card
-            title="Caption"
-            description="Used for every selected platform unless that platform has its own override."
+            title={draft.textOnly ? "Caption (the whole post)" : "Caption"}
+            description={
+              draft.textOnly
+                ? "A text-only post is published exactly as written. The tightest limit among the selected platforms applies."
+                : "Used for every selected platform unless that platform has its own override."
+            }
           >
             <textarea
               value={draft.caption}
               onChange={(event) => update("caption", event.target.value)}
               rows={4}
               aria-label="Caption"
-              placeholder="The caption or commentary that goes with the slides…"
+              placeholder={
+                draft.textOnly
+                  ? "Write the post. It is published exactly as typed…"
+                  : "The caption or commentary that goes with the slides…"
+              }
               className={`w-full resize-y rounded-lg border bg-white px-3 py-2 text-sm leading-relaxed outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-400/30 dark:bg-zinc-950 ${
-                draft.caption.length > SHARED_CAPTION_LIMIT
+                draft.caption.length > captionLimitShown
                   ? "border-red-400 dark:border-red-700"
                   : "border-zinc-300 dark:border-zinc-700"
               }`}
             />
-            <div className="mt-2 flex justify-end">
+            <div className="mt-2 flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0">
+                {draft.textOnly ? (
+                  <p className="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                    {captionNote("linkedin")} {captionNote("telegram")}
+                  </p>
+                ) : (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    The caption ceiling is{" "}
+                    {SHARED_CAPTION_LIMIT.toLocaleString("en-US")} characters.
+                  </p>
+                )}
+              </div>
               <p
                 className={`text-xs tabular-nums ${
-                  draft.caption.length > SHARED_CAPTION_LIMIT
+                  draft.caption.length > captionLimitShown
                     ? "font-medium text-red-600 dark:text-red-400"
                     : "text-zinc-500 dark:text-zinc-400"
                 }`}
               >
                 {draft.caption.length.toLocaleString("en-US")} /{" "}
-                {SHARED_CAPTION_LIMIT.toLocaleString("en-US")}
+                {captionLimitShown.toLocaleString("en-US")}
               </p>
             </div>
           </Card>
@@ -874,7 +953,8 @@ export function ComposeForm({ postId }: { postId: string | null }) {
             </p>
           </Card>
 
-          <Card title="Carousel and schedule">
+          <Card title={draft.textOnly ? "Schedule" : "Carousel and schedule"}>
+            {!draft.textOnly ? (
             <div
               role="radiogroup"
               aria-label="Carousel mode"
@@ -909,6 +989,7 @@ export function ComposeForm({ postId }: { postId: string | null }) {
                 </label>
               ))}
             </div>
+            ) : null}
 
             <div className="mt-5">
               <label htmlFor="schedule-at" className="block text-sm font-medium">
@@ -998,15 +1079,27 @@ export function ComposeForm({ postId }: { postId: string | null }) {
         </div>
 
         <div className="space-y-4 lg:sticky lg:top-20">
-          <SlidePreview
-            state={visiblePreview}
-            index={visibleSlideIndex}
-            onIndexChange={setSlideIndex}
-          />
-          <p className="px-1 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-            Preview updates automatically after you stop typing. A long post is
-            capped at the carousel limit, and the warning shows before you save.
-          </p>
+          {draft.textOnly ? (
+            <>
+              <TextPreview caption={draft.caption} />
+              <p className="px-1 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                No slides are rendered for a text-only post, so the SlidePreview
+                is replaced by the plain-text preview above.
+              </p>
+            </>
+          ) : (
+            <>
+              <SlidePreview
+                state={visiblePreview}
+                index={visibleSlideIndex}
+                onIndexChange={setSlideIndex}
+              />
+              <p className="px-1 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                Preview updates automatically after you stop typing. A long post is
+                capped at the carousel limit, and the warning shows before you save.
+              </p>
+            </>
+          )}
         </div>
       </div>
     </main>

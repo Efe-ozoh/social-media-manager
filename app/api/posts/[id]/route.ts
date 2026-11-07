@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import type { Prisma } from "@/lib/generated/prisma/client";
 import { readJsonBody } from "@/lib/api-body";
 import { createImageStore, keyFromPublicUrl } from "@/lib/image-store";
+import type { PlatformName } from "@/lib/platforms";
 import { renderSaveAndCleanup } from "@/lib/post-media";
 import {
   changesRenderedContent,
@@ -75,6 +76,12 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
   const parsed = parsePostUpdate(body.value, {
     currentContentType: existing.contentType,
     currentScheduledAt: existing.scheduledAt,
+    currentTextOnly: existing.textOnly,
+    currentCaption: existing.caption,
+    currentTargets: existing.targets.map((target) => ({
+      platform: target.platform as PlatformName,
+      captionOverride: target.captionOverride,
+    })),
   });
   if (!parsed.ok) {
     return NextResponse.json({ error: parsed.error }, { status: parsed.status });
@@ -102,7 +109,15 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     savePostUpdate(id, update, media);
 
   try {
-    if (contentChanged) {
+    if (update.textOnly === true) {
+      // Turning a post into text only drops its slides: the rows go first and
+      // the images they referenced are deleted afterwards.
+      await save([]);
+      const keys = existing.media
+        .map((row) => keyFromPublicUrl(row.url))
+        .filter((key): key is string => key !== null);
+      if (keys.length > 0) await deleteStaleImages(keys, store);
+    } else if (contentChanged) {
       await renderSaveAndCleanup({
         render: () =>
           renderPost(
@@ -194,6 +209,7 @@ async function savePostUpdate(
   if (update.language !== undefined) data.language = update.language;
   if (update.theme !== undefined) data.theme = update.theme;
   if (update.caption !== undefined) data.caption = update.caption;
+  if (update.textOnly !== undefined) data.textOnly = update.textOnly;
   if (update.carouselMode !== undefined) data.carouselMode = update.carouselMode;
   if (update.source !== undefined) data.source = update.source;
   if (update.aiPrompt !== undefined) data.aiPrompt = update.aiPrompt;

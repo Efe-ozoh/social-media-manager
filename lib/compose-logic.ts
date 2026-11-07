@@ -23,6 +23,8 @@ export type ComposeContentType = "text" | "code";
 export type ComposeIntent = "draft" | "schedule" | "publish-now";
 
 export type ComposeDraft = {
+  /** The caption is the whole post; no slides are rendered or stored. */
+  textOnly: boolean;
   text: string;
   contentType: ComposeContentType;
   language: string;
@@ -35,6 +37,7 @@ export type ComposeDraft = {
 
 export function emptyComposeDraft(): ComposeDraft {
   return {
+    textOnly: false,
     text: "",
     contentType: "text",
     language: "",
@@ -64,6 +67,17 @@ export function captionNote(platform: ComposePlatform): string {
 
 export function selectedPlatforms(draft: ComposeDraft): ComposePlatform[] {
   return COMPOSE_PLATFORMS.filter((platform) => draft.targets[platform]);
+}
+
+/**
+ * The caption limit for the whole post. A text-only post is sent as one plain
+ * message per platform, so the tightest selected limit applies; with no
+ * platform selected the shared API ceiling is the only bound.
+ */
+export function sharedCaptionLimit(draft: ComposeDraft): number {
+  const selected = selectedPlatforms(draft);
+  if (selected.length === 0) return SHARED_CAPTION_LIMIT;
+  return Math.min(...selected.map(captionLimit), SHARED_CAPTION_LIMIT);
 }
 
 export function effectiveCaption(
@@ -106,24 +120,41 @@ export function validateComposeDraft(input: ValidateComposeInput): ValidationRes
   const now = input.now ?? new Date();
   const errors: string[] = [];
 
-  if (draft.text.trim() === "") {
-    errors.push("Add some text before saving.");
-  }
-  const textLimit = contentLimit(draft.contentType);
-  if (draft.text.length > textLimit) {
-    errors.push(
-      `The editor is ${draft.text.length.toLocaleString("en-US")} characters; ` +
-        `${textLimit.toLocaleString("en-US")} is the ${draft.contentType} limit.`,
-    );
+  // A text-only post has no slide body, so the editor rules do not apply.
+  if (!draft.textOnly) {
+    if (draft.text.trim() === "") {
+      errors.push("Add some text before saving.");
+    }
+    const textLimit = contentLimit(draft.contentType);
+    if (draft.text.length > textLimit) {
+      errors.push(
+        `The editor is ${draft.text.length.toLocaleString("en-US")} characters; ` +
+          `${textLimit.toLocaleString("en-US")} is the ${draft.contentType} limit.`,
+      );
+    }
   }
 
   if (draft.caption.trim() === "") {
-    errors.push("Add a caption before saving.");
+    errors.push(
+      draft.textOnly
+        ? "Add the caption: a text-only post is published exactly as written."
+        : "Add a caption before saving.",
+    );
   }
   if (draft.caption.length > MAX_CAPTION_CHARS) {
     errors.push(
       `The caption is over the ${MAX_CAPTION_CHARS.toLocaleString("en-US")}-character shared limit.`,
     );
+  }
+  if (draft.textOnly) {
+    const limit = sharedCaptionLimit(draft);
+    if (draft.caption.length > limit) {
+      errors.push(
+        `A text-only caption is ${draft.caption.length.toLocaleString("en-US")} ` +
+          `characters; the limit for the selected platforms is ` +
+          `${limit.toLocaleString("en-US")}.`,
+      );
+    }
   }
 
   const targets = selectedPlatforms(draft);
@@ -197,13 +228,17 @@ export function buildComposePayload(
       : null;
 
   const payload: ComposePayload = {
-    text: draft.text,
+    text: draft.textOnly ? "" : draft.text,
+    text_only: draft.textOnly,
     content_type: draft.contentType,
-    code: draft.contentType === "code" ? draft.text : null,
+    code:
+      !draft.textOnly && draft.contentType === "code" ? draft.text : null,
     language:
-      draft.contentType === "code" ? draft.language.trim() || null : null,
+      !draft.textOnly && draft.contentType === "code"
+        ? draft.language.trim() || null
+        : null,
     caption: draft.caption,
-    carousel_mode: draft.carouselMode,
+    carousel_mode: draft.textOnly ? "off" : draft.carouselMode,
     source: "manual",
     targets: selectedPlatforms(draft).map((platform) => ({
       platform,
@@ -230,6 +265,7 @@ export function buildComposePayload(
 
 export function draftFingerprint(draft: ComposeDraft): string {
   return JSON.stringify({
+    textOnly: draft.textOnly,
     text: draft.text,
     contentType: draft.contentType,
     language: draft.language,

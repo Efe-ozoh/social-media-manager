@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MAX_TEXT_CHARS } from "./preview-request";
 import { parsePostCreate, parsePostUpdate } from "./post-request";
+import { LINKEDIN_MAX_CAPTION, TELEGRAM_MAX_TEXT } from "./publisher-limits";
 
 const NOW = new Date("2026-06-01T12:00:00Z");
 const FUTURE = "2026-06-01T12:05:00Z";
@@ -147,5 +148,144 @@ describe("parsePostUpdate", () => {
     expect(
       parsePostUpdate({}, { now: NOW, env: ENV, currentContentType: "text" }),
     ).toMatchObject({ ok: false, status: 400 });
+  });
+});
+
+describe("text-only posts", () => {
+  function textOnly(overrides: Record<string, unknown> = {}) {
+    return {
+      text_only: true,
+      caption: "Just words, no slides.",
+      targets: ["telegram"],
+      ...overrides,
+    };
+  }
+
+  it("accepts a post with no body text and pins it to one text card", () => {
+    const result = parsePostCreate(textOnly({ carousel_mode: "on" }), {
+      now: NOW,
+      env: ENV,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.textOnly).toBe(true);
+    expect(result.value.bodyText).toBe("");
+    expect(result.value.contentType).toBe("text");
+    expect(result.value.code).toBeNull();
+    expect(result.value.language).toBeNull();
+    expect(result.value.carouselMode).toBe("off");
+  });
+
+  it("still requires a caption", () => {
+    const result = parsePostCreate(textOnly({ caption: "   " }), {
+      now: NOW,
+      env: ENV,
+    });
+
+    expect(result).toMatchObject({ ok: false, status: 400 });
+  });
+
+  it("enforces LinkedIn's 3,000 character caption limit", () => {
+    const atLimit = parsePostCreate(
+      textOnly({ caption: "x".repeat(LINKEDIN_MAX_CAPTION), targets: ["linkedin"] }),
+      { now: NOW, env: ENV },
+    );
+    expect(atLimit.ok).toBe(true);
+
+    const tooLong = parsePostCreate(
+      textOnly({
+        caption: "x".repeat(LINKEDIN_MAX_CAPTION + 1),
+        targets: ["linkedin"],
+      }),
+      { now: NOW, env: ENV },
+    );
+    expect(tooLong).toMatchObject({ ok: false, status: 413 });
+    if (tooLong.ok) return;
+    expect(tooLong.error).toContain("linkedin");
+  });
+
+  it("enforces Telegram's 4,096 character message limit", () => {
+    const atLimit = parsePostCreate(
+      textOnly({ caption: "x".repeat(TELEGRAM_MAX_TEXT) }),
+      { now: NOW, env: ENV },
+    );
+    expect(atLimit.ok).toBe(true);
+
+    const tooLong = parsePostCreate(
+      textOnly({ caption: "x".repeat(TELEGRAM_MAX_TEXT + 1) }),
+      { now: NOW, env: ENV },
+    );
+    expect(tooLong).toMatchObject({ ok: false, status: 413 });
+  });
+
+  it("checks each platform's caption override too", () => {
+    const result = parsePostCreate(
+      textOnly({
+        caption: "Short shared caption",
+        targets: [
+          { platform: "linkedin", caption_override: "x".repeat(LINKEDIN_MAX_CAPTION + 1) },
+        ],
+      }),
+      { now: NOW, env: ENV },
+    );
+
+    expect(result).toMatchObject({ ok: false, status: 413 });
+  });
+
+  it("rejects a code card and a non-boolean flag", () => {
+    expect(
+      parsePostCreate(textOnly({ content_type: "code" }), { now: NOW, env: ENV }),
+    ).toMatchObject({ ok: false, status: 400 });
+
+    expect(
+      parsePostCreate(textOnly({ text_only: "yes" }), { now: NOW, env: ENV }),
+    ).toMatchObject({ ok: false, status: 400 });
+  });
+
+  it("still refuses Instagram and Facebook targets", () => {
+    for (const platform of ["instagram", "facebook"]) {
+      const result = parsePostCreate(textOnly({ targets: [platform] }), {
+        now: NOW,
+        env: ENV,
+      });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      expect(result.error).toContain("manual-export");
+    }
+  });
+
+  it("validates the stored caption when a PATCH turns a post text only", () => {
+    const result = parsePostUpdate(
+      { text_only: true },
+      {
+        now: NOW,
+        env: ENV,
+        currentTextOnly: false,
+        currentCaption: "x".repeat(LINKEDIN_MAX_CAPTION + 1),
+        currentTargets: [{ platform: "linkedin", captionOverride: null }],
+      },
+    );
+
+    expect(result).toMatchObject({ ok: false, status: 413 });
+  });
+
+  it("lets a PATCH turn text-only off again", () => {
+    const result = parsePostUpdate(
+      { text_only: false },
+      {
+        now: NOW,
+        env: ENV,
+        currentContentType: "text",
+        currentTextOnly: true,
+        currentCaption: "Just words.",
+        currentTargets: [{ platform: "linkedin", captionOverride: null }],
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.textOnly).toBe(false);
   });
 });

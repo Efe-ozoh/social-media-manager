@@ -44,6 +44,7 @@ export type PostRecord = {
   language: string | null;
   theme: string;
   caption: string;
+  textOnly: boolean;
   carouselMode: string;
   backgroundMode: string;
   backgroundQuery: string | null;
@@ -77,6 +78,7 @@ export function serializePost(post: PostRecord) {
     language: post.language,
     theme: post.theme,
     caption: post.caption,
+    textOnly: post.textOnly,
     carouselMode: post.carouselMode,
     background: {
       mode: post.backgroundMode,

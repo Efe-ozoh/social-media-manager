@@ -20,6 +20,7 @@ import {
   schedulablePlatforms,
   type PlatformName,
 } from "./platforms";
+import { LINKEDIN_MAX_CAPTION, TELEGRAM_MAX_TEXT } from "./publisher-limits";
 import type { SplitContentType } from "./splitter";
 import { isUnsplashImageUrl } from "./unsplash";
 
@@ -59,6 +60,7 @@ export type PostBackgroundInput = {
 export type PostCreateInput = {
   title: string | null;
   bodyText: string;
+  textOnly: boolean;
   contentType: SplitContentType;
   code: string | null;
   language: string | null;
@@ -76,6 +78,7 @@ export type PostCreateInput = {
 export type PostUpdateInput = {
   title?: string | null;
   bodyText?: string;
+  textOnly?: boolean;
   contentType?: SplitContentType;
   code?: string | null;
   language?: string | null;
@@ -102,6 +105,10 @@ export type ParseOptions = {
 export type UpdateParseOptions = ParseOptions & {
   currentContentType?: SplitContentType;
   currentScheduledAt?: Date | null;
+  /** The stored text-only flag, so a PATCH can be validated as a whole post. */
+  currentTextOnly?: boolean;
+  currentCaption?: string;
+  currentTargets?: PostTargetInput[];
 };
 
 function fail<T>(status: 400 | 413, error: string): PostParseResult<T> {
@@ -153,6 +160,45 @@ function parseCarouselMode(value: unknown): CarouselMode | undefined {
 function parseSource(value: unknown): PostSource | undefined {
   if (value === undefined) return undefined;
   return value === "manual" || value === "ai" ? value : undefined;
+}
+
+/**
+ * The longest caption each automated platform accepts when the post is text
+ * only. LinkedIn's commentary field is 3,000 characters; Telegram's
+ * sendMessage text is 4,096.
+ */
+export function captionLimitFor(platform: PlatformName): number {
+  return platform === "linkedin" ? LINKEDIN_MAX_CAPTION : TELEGRAM_MAX_TEXT;
+}
+
+function parseTextOnly(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  return typeof value === "boolean" ? value : undefined;
+}
+
+/**
+ * A text-only post publishes its caption as plain text, so every platform that
+ * receives it must be able to carry the whole caption in one message. Image
+ * posts keep the shared 4,096 ceiling; text-only posts get the tighter per
+ * platform limit.
+ */
+function checkTextOnlyCaption(
+  caption: string,
+  targets: readonly PostTargetInput[],
+): { status: 413; error: string } | null {
+  for (const target of targets) {
+    const text = target.captionOverride ?? caption;
+    const limit = captionLimitFor(target.platform);
+    if (text.length > limit) {
+      return {
+        status: 413,
+        error:
+          `A text-only post's caption is too long for ${target.platform}: ` +
+          `${limit.toLocaleString("en-US")} characters max, ${text.length.toLocaleString("en-US")} given.`,
+      };
+    }
+  }
+  return null;
 }
 
 function parsePostStatus(value: unknown): PostStatus | undefined {
@@ -369,35 +415,57 @@ export function parsePostCreate(
   const record = asRecord(body);
   if (!record) return fail(400, "Expected a JSON object.");
 
+  const rawTextOnly = pick(record, "text_only", "textOnly");
+  const textOnly = parseTextOnly(rawTextOnly) ?? false;
+  if (rawTextOnly !== undefined && parseTextOnly(rawTextOnly) === undefined) {
+    return fail(400, "text_only must be true or false.");
+  }
+
   const rawText = pick(record, "text", "body_text", "bodyText");
-  if (typeof rawText !== "string") return fail(400, "text is required.");
-  const bodyText = rawText;
+  if (
+    rawText !== undefined &&
+    rawText !== null &&
+    typeof rawText !== "string"
+  ) {
+    return fail(400, "text must be a string.");
+  }
+  // A text-only post has no slide body, so its text is optional: it is kept
+  // for editing but never published.
+  if (!textOnly && typeof rawText !== "string") return fail(400, "text is required.");
+  const bodyText = typeof rawText === "string" ? rawText : "";
 
   const rawContentType = pick(record, "content_type", "contentType");
   if (rawContentType !== undefined && rawContentType !== "text" && rawContentType !== "code") {
     return fail(400, 'content_type must be "text" or "code".');
   }
+  if (textOnly && rawContentType === "code") {
+    return fail(400, "A text-only post cannot have a code card.");
+  }
   const contentType: SplitContentType = rawContentType === "code" ? "code" : "text";
 
-  const textLimit = contentType === "code" ? MAX_CODE_CHARS : MAX_TEXT_CHARS;
-  if (bodyText.trim().length === 0) return fail(400, "text is required.");
-  if (bodyText.length > textLimit) {
-    return fail(
-      413,
-      `text is too long: ${textLimit.toLocaleString("en-US")} characters max for ${contentType}.`,
-    );
+  if (!textOnly) {
+    const textLimit = contentType === "code" ? MAX_CODE_CHARS : MAX_TEXT_CHARS;
+    if (bodyText.trim().length === 0) return fail(400, "text is required.");
+    if (bodyText.length > textLimit) {
+      return fail(
+        413,
+        `text is too long: ${textLimit.toLocaleString("en-US")} characters max for ${contentType}.`,
+      );
+    }
   }
 
   const rawCode = pick(record, "code");
   if (rawCode !== undefined && rawCode !== null && typeof rawCode !== "string") {
     return fail(400, "code must be a string.");
   }
-  const code = typeof rawCode === "string" ? rawCode : null;
+  const code = textOnly ? null : typeof rawCode === "string" ? rawCode : null;
   if (code !== null && code.length > MAX_CODE_CHARS) {
     return fail(413, `code is too long: ${MAX_CODE_CHARS.toLocaleString("en-US")} characters max.`);
   }
 
-  const language = parseLanguage(pick(record, "language"));
+  const language = textOnly
+    ? null
+    : parseLanguage(pick(record, "language"));
   if (language === undefined) return fail(400, "language contains unsupported characters.");
 
   const rawCaption = pick(record, "caption");
@@ -421,13 +489,15 @@ export function parsePostCreate(
   }
   const theme = optionalString(rawTheme, MAX_THEME_CHARS) ?? "default";
 
-  const carouselMode = parseCarouselMode(pick(record, "carousel_mode", "carouselMode")) ?? "auto";
+  const rawCarousel = parseCarouselMode(pick(record, "carousel_mode", "carouselMode"));
   if (
     pick(record, "carousel_mode", "carouselMode") !== undefined &&
-    parseCarouselMode(pick(record, "carousel_mode", "carouselMode")) === undefined
+    rawCarousel === undefined
   ) {
     return fail(400, 'carousel_mode must be "auto", "on" or "off".');
   }
+  // A text-only post has nothing to split, so the mode is pinned to "off".
+  const carouselMode: CarouselMode = textOnly ? "off" : rawCarousel ?? "auto";
 
   const source = parseSource(pick(record, "source")) ?? "manual";
   if (pick(record, "source") !== undefined && parseSource(pick(record, "source")) === undefined) {
@@ -465,11 +535,17 @@ export function parsePostCreate(
   const targets = parseTargets(pick(record, "targets"), options.env ?? process.env);
   if (!Array.isArray(targets)) return fail(targets.status, targets.error);
 
+  if (textOnly) {
+    const tooLong = checkTextOnlyCaption(caption, targets);
+    if (tooLong) return fail(tooLong.status, tooLong.error);
+  }
+
   return {
     ok: true,
     value: {
       title,
       bodyText,
+      textOnly,
       contentType,
       code,
       language,
@@ -496,6 +572,14 @@ export function parsePostUpdate(
 
   const update: PostUpdateInput = {};
 
+  if (has(record, "text_only", "textOnly")) {
+    const textOnly = parseTextOnly(pick(record, "text_only", "textOnly"));
+    if (textOnly === undefined) return fail(400, "text_only must be true or false.");
+    update.textOnly = textOnly;
+  }
+
+  const effectiveTextOnly = update.textOnly ?? options.currentTextOnly ?? false;
+
   if (has(record, "text", "body_text", "bodyText")) {
     const rawText = pick(record, "text", "body_text", "bodyText");
     if (typeof rawText !== "string") return fail(400, "text must be a string.");
@@ -510,7 +594,10 @@ export function parsePostUpdate(
 
   const effectiveContentType =
     update.contentType ?? options.currentContentType ?? "text";
-  if (update.bodyText !== undefined) {
+  if (effectiveTextOnly && effectiveContentType === "code") {
+    return fail(400, "A text-only post cannot have a code card.");
+  }
+  if (update.bodyText !== undefined && !effectiveTextOnly) {
     if (update.bodyText.trim().length === 0) return fail(400, "text is required.");
     const limit = effectiveContentType === "code" ? MAX_CODE_CHARS : MAX_TEXT_CHARS;
     if (update.bodyText.length > limit) {
@@ -625,6 +712,17 @@ export function parsePostUpdate(
     update.targets = targets;
   }
 
+  if (effectiveTextOnly) {
+    const caption = update.caption ?? options.currentCaption ?? "";
+    if (caption.trim().length === 0) return fail(400, "caption is required.");
+
+    const tooLong = checkTextOnlyCaption(
+      caption,
+      update.targets ?? options.currentTargets ?? [],
+    );
+    if (tooLong) return fail(tooLong.status, tooLong.error);
+  }
+
   if (Object.keys(update).length === 0) {
     return fail(400, "No editable fields were provided.");
   }
@@ -635,6 +733,9 @@ export function parsePostUpdate(
 /** True when one of the fields a render depends on is being changed. */
 export function changesRenderedContent(update: PostUpdateInput): boolean {
   return (
+    // Toggling the flag changes whether slides exist at all, in both
+    // directions: on, the old slides must be deleted; off, they are rendered.
+    update.textOnly !== undefined ||
     update.bodyText !== undefined ||
     update.contentType !== undefined ||
     update.code !== undefined ||

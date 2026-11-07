@@ -79,6 +79,8 @@ export type ClaimedTarget = {
   captionOverride: string | null;
   attempts: number;
   caption: string;
+  /** Text-only posts publish with no images, whatever the storage says. */
+  textOnly?: boolean;
 };
 
 export type ResetStuckInput = { cutoff: Date; now: Date };
@@ -243,7 +245,9 @@ async function processTarget(
       });
     }
 
-    const imageUrls = await store.getMediaUrls(target.postId);
+    // A text-only post never has images to send, and is not even asked for
+    // them: publishers get an empty list and post the caption as text.
+    const imageUrls = target.textOnly ? [] : await store.getMediaUrls(target.postId);
     const caption =
       target.captionOverride && target.captionOverride.trim() !== ""
         ? target.captionOverride
@@ -458,6 +462,7 @@ type RawClaimedTarget = {
   captionOverride: string | null;
   attempts: number;
   caption: string;
+  textOnly: boolean;
 };
 
 /** The production store: all scheduler state lives in Postgres. */
@@ -497,7 +502,8 @@ export function createPrismaDispatchStore(
               t.platform,
               t.caption_override,
               t.attempts + 1 AS attempts,
-              p.caption
+              p.caption,
+              p.text_only
             FROM "post_targets" t
             JOIN "posts" p ON p.id = t.post_id
             WHERE p.status = 'scheduled'
@@ -527,7 +533,8 @@ export function createPrismaDispatchStore(
             t.platform::text AS "platform",
             t.caption_override AS "captionOverride",
             t.attempts AS "attempts",
-            due.caption AS "caption"
+            due.caption AS "caption",
+            due.text_only AS "textOnly"
         `);
       });
 
@@ -538,6 +545,7 @@ export function createPrismaDispatchStore(
         captionOverride: row.captionOverride,
         attempts: Number(row.attempts),
         caption: row.caption,
+        textOnly: row.textOnly === true,
       }));
     },
 

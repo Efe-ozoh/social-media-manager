@@ -96,6 +96,9 @@ model Post {
   language        String?        @db.VarChar(50)
   theme           String         @db.VarChar(50)
   caption         String         @db.Text
+  // Phase 5c: the caption is the whole post. No slides are rendered or stored,
+  // and the dispatcher publishes it with an empty image list.
+  textOnly        Boolean        @default(false) @map("text_only")
   carouselMode    CarouselMode   @default(auto) @map("carousel_mode")
   // Background photo (Phase 2b). backgroundMode "solid" ignores the bg_* row.
   backgroundMode  BackgroundMode @default(solid) @map("background_mode")

@@ -18,7 +18,11 @@ import {
   type ResetStuckInput,
 } from "./dispatcher";
 import type { PlatformName } from "./platforms";
-import { PublishError, type Publisher } from "./publishers/types";
+import {
+  PublishError,
+  type PublishInput,
+  type Publisher,
+} from "./publishers/types";
 
 const NOW = new Date("2026-06-01T12:00:00Z");
 const ENV = {
@@ -32,6 +36,7 @@ type FakePost = {
   status: "scheduled" | "published" | "partial" | "failed";
   scheduledAt: Date;
   mediaUrls: string[];
+  textOnly?: boolean;
 };
 
 type FakeTarget = {
@@ -163,6 +168,7 @@ class FakeStore implements DispatchStore {
         captionOverride: target.captionOverride,
         attempts: target.attempts,
         caption: post.caption,
+        textOnly: post.textOnly === true,
       };
     });
   }
@@ -282,6 +288,39 @@ describe("dispatchDue", () => {
     expect(text).toContain("FOR UPDATE OF t SKIP LOCKED");
     expect(text).toContain("status = 'processing'");
     expect(text).toContain("attempts = t.attempts + 1");
+    // The claim carries the text-only flag so a dispatch never reads slides
+    // for a post that has none.
+    expect(text).toContain("text_only");
+  });
+
+  it("publishes a text-only post with an empty image list", async () => {
+    const store = new FakeStore();
+    store.addPost("post-1", {
+      caption: "Plain words only",
+      textOnly: true,
+      // A leftover row must not leak into the publisher input.
+      mediaUrls: ["https://example.com/leftover.jpg"],
+    });
+    store.addTarget("target-1", "post-1", { platform: "telegram" });
+
+    const captured: PublishInput[] = [];
+    const publish = vi.fn(async (input: PublishInput) => {
+      captured.push(input);
+      return { externalPostId: "telegram-77", publishedAt: NOW };
+    });
+
+    const summary = await dispatchDue({
+      store,
+      publishers: { telegram: publisher("telegram", publish) },
+      env: ENV,
+      now: NOW,
+    });
+
+    expect(summary.published).toBe(1);
+    expect(captured).toHaveLength(1);
+    expect(captured[0].imageUrls).toEqual([]);
+    expect(captured[0].caption).toBe("Plain words only");
+    expect(store.posts.get("post-1")?.status).toBe("published");
   });
 
   it("never lets two overlapping runs publish the same target", async () => {

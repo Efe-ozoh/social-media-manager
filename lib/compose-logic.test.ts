@@ -8,6 +8,7 @@ import {
   emptyComposeDraft,
   formatScheduleLabel,
   selectedPlatforms,
+  sharedCaptionLimit,
   utcToLocalDateTime,
   validateComposeDraft,
   zonedDateTimeToUtc,
@@ -275,5 +276,90 @@ describe("buildComposePayload", () => {
       "linkedin",
       "telegram",
     ]);
+  });
+});
+
+describe("text-only compose drafts", () => {
+  it("sends text_only and drops the slide fields", () => {
+    const payload = buildComposePayload({
+      draft: draft({
+        textOnly: true,
+        text: "body that must not be published",
+        caption: "Just words.",
+        contentType: "code",
+        language: "typescript",
+        carouselMode: "on",
+      }),
+      intent: "draft",
+      timeZone: "UTC",
+    });
+
+    expect(payload).toMatchObject({
+      text_only: true,
+      text: "",
+      code: null,
+      language: null,
+      carousel_mode: "off",
+      caption: "Just words.",
+    });
+  });
+
+  it("does not need body text but still needs a caption", () => {
+    const ok = validateComposeDraft({
+      draft: draft({ textOnly: true, text: "", caption: "Just words." }),
+      statuses: STATUSES,
+      timeZone: "UTC",
+      now: NOW,
+    });
+    expect(ok.ok).toBe(true);
+
+    const missing = validateComposeDraft({
+      draft: draft({ textOnly: true, text: "", caption: "   " }),
+      statuses: STATUSES,
+      timeZone: "UTC",
+      now: NOW,
+    });
+    expect(missing.ok).toBe(false);
+    if (missing.ok) return;
+    expect(missing.errors.join(" ")).toContain("text-only");
+  });
+
+  it("uses the tightest selected platform for the shared counter", () => {
+    expect(
+      sharedCaptionLimit(
+        draft({ textOnly: true, targets: { linkedin: true, telegram: true } }),
+      ),
+    ).toBe(LINKEDIN_MAX_CAPTION);
+    expect(
+      sharedCaptionLimit(
+        draft({ textOnly: true, targets: { linkedin: false, telegram: true } }),
+      ),
+    ).toBe(TELEGRAM_MAX_TEXT);
+    expect(
+      sharedCaptionLimit(
+        draft({ textOnly: true, targets: { linkedin: false, telegram: false } }),
+      ),
+    ).toBe(4_096);
+  });
+
+  it("refuses a caption over the selected limit before saving", () => {
+    const result = validateComposeDraft({
+      draft: draft({
+        textOnly: true,
+        caption: "x".repeat(LINKEDIN_MAX_CAPTION + 1),
+        targets: { linkedin: true, telegram: false },
+      }),
+      statuses: STATUSES,
+      timeZone: "UTC",
+      now: NOW,
+    });
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("fingerprints the format toggle", () => {
+    expect(draftFingerprint(draft({ textOnly: true }))).not.toBe(
+      draftFingerprint(draft({ textOnly: false })),
+    );
   });
 });

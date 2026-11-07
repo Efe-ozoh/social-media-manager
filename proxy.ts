@@ -6,7 +6,7 @@ import { SESSION_COOKIE, verifySessionToken } from "@/lib/session";
 // is protected by its own one-shot `state` cookie, and the browser arrives
 // from the provider as a top-level navigation. The cron route is protected by
 // its own CRON_SECRET check instead (lib/cron-auth.ts).
-const PUBLIC_PATHS = [
+export const PUBLIC_PATHS = [
   "/login",
   "/api/auth/login",
   "/api/auth/linkedin/callback",

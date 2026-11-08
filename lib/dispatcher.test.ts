@@ -37,6 +37,11 @@ type FakePost = {
   scheduledAt: Date;
   mediaUrls: string[];
   textOnly?: boolean;
+  backgroundMode?: "solid" | "unsplash";
+  bgAuthorName?: string | null;
+  contentType?: "text" | "code";
+  usePhotoBehindCode?: boolean;
+  creditCaption?: boolean;
 };
 
 type FakeTarget = {
@@ -58,6 +63,8 @@ type FakeTarget = {
 class FakeStore implements DispatchStore {
   readonly posts = new Map<string, FakePost>();
   readonly targets = new Map<string, FakeTarget>();
+  /** Post ids whose background download was reported, in order. */
+  readonly trackedDownloads: string[] = [];
 
   addPost(
     id: string,
@@ -169,8 +176,17 @@ class FakeStore implements DispatchStore {
         attempts: target.attempts,
         caption: post.caption,
         textOnly: post.textOnly === true,
+        backgroundMode: post.backgroundMode ?? "solid",
+        bgAuthorName: post.bgAuthorName ?? null,
+        contentType: post.contentType ?? "text",
+        usePhotoBehindCode: post.usePhotoBehindCode === true,
+        creditCaption: post.creditCaption !== false,
       };
     });
+  }
+
+  async trackBackgroundDownload(postId: string): Promise<void> {
+    this.trackedDownloads.push(postId);
   }
 
   async getMediaUrls(postId: string): Promise<string[]> {
@@ -291,6 +307,124 @@ describe("dispatchDue", () => {
     // The claim carries the text-only flag so a dispatch never reads slides
     // for a post that has none.
     expect(text).toContain("text_only");
+    // And the background fields needed for the photo credit.
+    expect(text).toContain("bg_author_name");
+    expect(text).toContain("bg_credit_caption");
+  });
+
+  it("tracks the background download once per claimed target", async () => {
+    const store = new FakeStore();
+    store.addPost("post-1", { backgroundMode: "unsplash", bgAuthorName: "Jane Doe" });
+    store.addTarget("target-1", "post-1");
+
+    const publish = vi.fn(async () => ({
+      externalPostId: "telegram-123",
+      publishedAt: NOW,
+    }));
+
+    await dispatchDue({
+      store,
+      publishers: { telegram: publisher("telegram", publish) },
+      env: ENV,
+      now: NOW,
+    });
+
+    expect(store.trackedDownloads).toEqual(["post-1"]);
+  });
+
+  it("appends the photographer's credit to the caption", async () => {
+    const store = new FakeStore();
+    store.addPost("post-1", {
+      caption: "Morning light over the lake",
+      backgroundMode: "unsplash",
+      bgAuthorName: "Jane Doe",
+    });
+    store.addTarget("target-1", "post-1");
+
+    const captured: PublishInput[] = [];
+    const publish = vi.fn(async (input: PublishInput) => {
+      captured.push(input);
+      return { externalPostId: "telegram-123", publishedAt: NOW };
+    });
+
+    await dispatchDue({
+      store,
+      publishers: { telegram: publisher("telegram", publish) },
+      env: ENV,
+      now: NOW,
+    });
+
+    expect(captured[0].caption).toBe(
+      "Morning light over the lake\n\nPhoto by Jane Doe on Unsplash",
+    );
+  });
+
+  it("only credits a code card's photo when it is drawn behind the code", async () => {
+    const store = new FakeStore();
+    store.addPost("code-off", {
+      caption: "Solid code card",
+      contentType: "code",
+      backgroundMode: "unsplash",
+      bgAuthorName: "Jane Doe",
+    });
+    store.addTarget("target-1", "code-off");
+    store.addPost("code-on", {
+      caption: "Code over a photo",
+      contentType: "code",
+      backgroundMode: "unsplash",
+      bgAuthorName: "Jane Doe",
+      usePhotoBehindCode: true,
+    });
+    store.addTarget("target-2", "code-on");
+
+    const captured: PublishInput[] = [];
+    const publish = vi.fn(async (input: PublishInput) => {
+      captured.push(input);
+      return { externalPostId: "telegram-123", publishedAt: NOW };
+    });
+
+    await dispatchDue({
+      store,
+      publishers: { telegram: publisher("telegram", publish) },
+      env: ENV,
+      now: NOW,
+    });
+
+    expect(captured.map((input) => input.caption)).toEqual([
+      "Solid code card",
+      "Code over a photo\n\nPhoto by Jane Doe on Unsplash",
+    ]);
+  });
+
+  it("skips the credit when the option is off or no photo is used", async () => {
+    const store = new FakeStore();
+    store.addPost("off-1", {
+      caption: "No credit please",
+      backgroundMode: "unsplash",
+      bgAuthorName: "Jane Doe",
+      creditCaption: false,
+    });
+    store.addTarget("target-1", "off-1");
+    store.addPost("solid-1", { caption: "Solid background" });
+    store.addTarget("target-2", "solid-1");
+
+    const captured: PublishInput[] = [];
+    const publish = vi.fn(async (input: PublishInput) => {
+      captured.push(input);
+      return { externalPostId: "telegram-123", publishedAt: NOW };
+    });
+
+    await dispatchDue({
+      store,
+      publishers: { telegram: publisher("telegram", publish) },
+      env: ENV,
+      now: NOW,
+    });
+
+    expect(captured.map((input) => input.caption)).toEqual([
+      "No credit please",
+      "Solid background",
+    ]);
   });
 
   it("publishes a text-only post with an empty image list", async () => {

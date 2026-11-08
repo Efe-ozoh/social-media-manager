@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { MAX_TEXT_CHARS } from "./preview-request";
-import { parsePostCreate, parsePostUpdate } from "./post-request";
+import {
+  changesRenderedContent,
+  parsePostCreate,
+  parsePostUpdate,
+} from "./post-request";
 import { LINKEDIN_MAX_CAPTION, TELEGRAM_MAX_TEXT } from "./publisher-limits";
 
 const NOW = new Date("2026-06-01T12:00:00Z");
@@ -287,5 +291,104 @@ describe("text-only posts", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.textOnly).toBe(false);
+  });
+});
+
+describe("background photo options", () => {
+  const PHOTO = {
+    mode: "unsplash",
+    query: "misty lake",
+    unsplashId: "photo-1",
+    url: "https://images.unsplash.com/photo-1?w=1080&h=1350",
+    thumbUrl: "https://images.unsplash.com/photo-1?w=360&h=450",
+    authorName: "Jane Doe",
+    authorUrl: "https://unsplash.com/@jane?utm_source=codesync_hub",
+    color: "#1a2b3c",
+    downloadLocation: "https://api.unsplash.com/photos/photo-1/download?ixid=abc",
+  };
+
+  it("stores the photo, its download endpoint and both toggles", () => {
+    const result = parsePostCreate(
+      body({
+        background: PHOTO,
+        use_photo_behind_code: true,
+        bg_credit_caption: false,
+      }),
+      { now: NOW, env: ENV },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.background.backgroundMode).toBe("unsplash");
+    expect(result.value.background.bgUnsplashId).toBe("photo-1");
+    expect(result.value.background.bgDownloadLocation).toBe(
+      PHOTO.downloadLocation,
+    );
+    expect(result.value.usePhotoBehindCode).toBe(true);
+    expect(result.value.creditCaption).toBe(false);
+  });
+
+  it("defaults to a solid background with the credit on", () => {
+    const result = parsePostCreate(body(), { now: NOW, env: ENV });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.background).toEqual({
+      backgroundMode: "solid",
+      backgroundQuery: null,
+      bgUnsplashId: null,
+      bgUrl: null,
+      bgThumbUrl: null,
+      bgAuthorName: null,
+      bgAuthorUrl: null,
+      bgColor: null,
+      bgDownloadLocation: null,
+    });
+    expect(result.value.usePhotoBehindCode).toBe(false);
+    expect(result.value.creditCaption).toBe(true);
+  });
+
+  it("rejects a download endpoint that is not Unsplash's", () => {
+    const result = parsePostCreate(
+      body({
+        background: { ...PHOTO, downloadLocation: "https://evil.example/download" },
+      }),
+      { now: NOW, env: ENV },
+    );
+
+    expect(result).toMatchObject({ ok: false, status: 400 });
+  });
+
+  it("rejects non-boolean toggles", () => {
+    expect(
+      parsePostCreate(body({ use_photo_behind_code: "yes" }), { now: NOW, env: ENV }),
+    ).toMatchObject({ ok: false, status: 400 });
+    expect(
+      parsePostCreate(body({ bg_credit_caption: 1 }), { now: NOW, env: ENV }),
+    ).toMatchObject({ ok: false, status: 400 });
+  });
+
+  it("accepts the same fields on a PATCH", () => {
+    const result = parsePostUpdate(
+      {
+        background: PHOTO,
+        use_photo_behind_code: true,
+        bg_credit_caption: false,
+      },
+      { now: NOW, env: ENV },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.background?.bgDownloadLocation).toBe(
+      PHOTO.downloadLocation,
+    );
+    expect(result.value.usePhotoBehindCode).toBe(true);
+    expect(result.value.creditCaption).toBe(false);
+  });
+
+  it("renders again when the behind-code toggle changes", () => {
+    expect(changesRenderedContent({ usePhotoBehindCode: true })).toBe(true);
+    expect(changesRenderedContent({ creditCaption: false })).toBe(false);
   });
 });

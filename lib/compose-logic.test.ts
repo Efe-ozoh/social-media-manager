@@ -10,6 +10,7 @@ import {
   selectedPlatforms,
   sharedCaptionLimit,
   utcToLocalDateTime,
+  usesBackgroundPhoto,
   validateComposeDraft,
   zonedDateTimeToUtc,
   type ComposeDraft,
@@ -360,6 +361,97 @@ describe("text-only compose drafts", () => {
   it("fingerprints the format toggle", () => {
     expect(draftFingerprint(draft({ textOnly: true }))).not.toBe(
       draftFingerprint(draft({ textOnly: false })),
+    );
+  });
+});
+
+describe("background picker drafts", () => {
+  const PHOTO = {
+    id: "photo-1",
+    url: "https://images.unsplash.com/photo-1?w=1080",
+    thumbUrl: "https://images.unsplash.com/photo-1?w=360",
+    authorName: "Jane Doe",
+    authorUrl: "https://unsplash.com/@jane?utm_source=codesync_hub",
+    color: "#1a2b3c",
+    downloadLocation: "https://api.unsplash.com/photos/photo-1/download?ixid=abc",
+  };
+
+  it("sends the chosen photo, query and both toggles", () => {
+    const payload = buildComposePayload({
+      draft: draft({
+        backgroundMode: "pick",
+        backgroundQuery: " misty lake ",
+        backgroundPhoto: PHOTO,
+        usePhotoBehindCode: true,
+      }),
+      intent: "draft",
+      timeZone: "UTC",
+    });
+
+    expect(payload.background).toEqual({
+      mode: "unsplash",
+      query: "misty lake",
+      unsplashId: "photo-1",
+      url: PHOTO.url,
+      thumbUrl: PHOTO.thumbUrl,
+      authorName: "Jane Doe",
+      authorUrl: PHOTO.authorUrl,
+      color: "#1a2b3c",
+      downloadLocation: PHOTO.downloadLocation,
+    });
+    expect(payload.use_photo_behind_code).toBe(true);
+    expect(payload.bg_credit_caption).toBe(true);
+  });
+
+  it("falls back to a solid background when no photo was chosen", () => {
+    const payload = buildComposePayload({
+      draft: draft({ backgroundMode: "auto", backgroundQuery: "misty lake" }),
+      intent: "draft",
+      timeZone: "UTC",
+    });
+
+    expect(payload.background).toEqual({ mode: "solid" });
+    expect(payload.use_photo_behind_code).toBe(false);
+    expect(payload.bg_credit_caption).toBe(true);
+  });
+
+  it("never sends a photo for a text-only post", () => {
+    const payload = buildComposePayload({
+      draft: draft({
+        textOnly: true,
+        caption: "Plain words",
+        backgroundMode: "pick",
+        backgroundPhoto: PHOTO,
+      }),
+      intent: "draft",
+      timeZone: "UTC",
+    });
+
+    expect(payload.background).toEqual({ mode: "solid" });
+    expect(payload.bg_credit_caption).toBe(true);
+  });
+
+  it("only counts a photo that will actually be used", () => {
+    expect(
+      usesBackgroundPhoto(draft({ backgroundMode: "pick", backgroundPhoto: PHOTO })),
+    ).toBe(true);
+    expect(
+      usesBackgroundPhoto(draft({ backgroundMode: "off", backgroundPhoto: PHOTO })),
+    ).toBe(false);
+    expect(usesBackgroundPhoto(draft({ backgroundMode: "auto" }))).toBe(false);
+    expect(
+      usesBackgroundPhoto(
+        draft({ textOnly: true, backgroundMode: "pick", backgroundPhoto: PHOTO }),
+      ),
+    ).toBe(false);
+  });
+
+  it("fingerprints the photo and the behind-code toggle", () => {
+    expect(
+      draftFingerprint(draft({ backgroundMode: "pick", backgroundPhoto: PHOTO })),
+    ).not.toBe(draftFingerprint(draft({ backgroundMode: "pick" })));
+    expect(draftFingerprint(draft({ usePhotoBehindCode: true }))).not.toBe(
+      draftFingerprint(draft({ usePhotoBehindCode: false })),
     );
   });
 });

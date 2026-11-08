@@ -22,6 +22,9 @@
 
 import { Prisma, type PrismaClient } from "@/lib/generated/prisma/client";
 import type { PostStatus } from "@/lib/generated/prisma/enums";
+import { appendPhotoCredit } from "./background-credit";
+import { trackBackgroundForPost } from "./background-tracking";
+import { captionLimitFor } from "./post-request";
 import { getPrisma } from "./prisma";
 import {
   automatedPlatforms,
@@ -81,6 +84,14 @@ export type ClaimedTarget = {
   caption: string;
   /** Text-only posts publish with no images, whatever the storage says. */
   textOnly?: boolean;
+  /** Set when the slides carry an Unsplash photo behind them. */
+  backgroundMode?: string;
+  bgAuthorName?: string | null;
+  contentType?: string;
+  /** Code cards only show the photo when this is on. */
+  usePhotoBehindCode?: boolean;
+  /** On by default: append "Photo by {name} on Unsplash" to the caption. */
+  creditCaption?: boolean;
 };
 
 export type ResetStuckInput = { cutoff: Date; now: Date };
@@ -114,6 +125,11 @@ export interface DispatchStore {
   markPublished(targetId: string, input: MarkPublishedInput): Promise<void>;
   markFailure(targetId: string, input: MarkFailureInput): Promise<void>;
   recomputePostStatus(postId: string): Promise<PostStatus>;
+  /**
+   * Reports the background photo's download to Unsplash once per photo. Only
+   * the production store implements it; fakes may omit it.
+   */
+  trackBackgroundDownload?(postId: string): Promise<unknown>;
 }
 
 export type DispatchStatus = "published" | "retried" | "failed";
@@ -245,13 +261,38 @@ async function processTarget(
       });
     }
 
+    // Unsplash wants the download reported when the photo is used. This runs
+    // before publishing and is idempotent, so a scheduled post reports it on
+    // its first dispatch and retries never report it twice.
+    await store.trackBackgroundDownload?.(target.postId);
+
     // A text-only post never has images to send, and is not even asked for
     // them: publishers get an empty list and post the caption as text.
     const imageUrls = target.textOnly ? [] : await store.getMediaUrls(target.postId);
-    const caption =
+    const baseCaption =
       target.captionOverride && target.captionOverride.trim() !== ""
         ? target.captionOverride
         : target.caption;
+
+    // The photographer is credited in the caption only when the post actually
+    // shows the photo (a slide post with an Unsplash background, and for code
+    // cards only with the behind-code toggle on) and the owner kept the option
+    // on.
+    const showsPhoto =
+      target.backgroundMode === "unsplash" &&
+      (target.contentType !== "code" || target.usePhotoBehindCode === true);
+
+    const caption =
+      !target.textOnly &&
+      showsPhoto &&
+      target.creditCaption !== false &&
+      target.bgAuthorName
+        ? appendPhotoCredit(
+            baseCaption,
+            target.bgAuthorName,
+            captionLimitFor(target.platform),
+          )
+        : baseCaption;
 
     const result = await publisher.publish({ caption, imageUrls, account });
     const notes = result.notes && result.notes.length > 0 ? result.notes.join("\n") : null;
@@ -463,6 +504,11 @@ type RawClaimedTarget = {
   attempts: number;
   caption: string;
   textOnly: boolean;
+  backgroundMode: string;
+  bgAuthorName: string | null;
+  contentType: string;
+  usePhotoBehindCode: boolean;
+  bgCreditCaption: boolean;
 };
 
 /** The production store: all scheduler state lives in Postgres. */
@@ -503,7 +549,12 @@ export function createPrismaDispatchStore(
               t.caption_override,
               t.attempts + 1 AS attempts,
               p.caption,
-              p.text_only
+              p.text_only,
+              p.background_mode::text AS background_mode,
+              p.bg_author_name,
+              p.content_type::text AS content_type,
+              p.use_photo_behind_code,
+              p.bg_credit_caption
             FROM "post_targets" t
             JOIN "posts" p ON p.id = t.post_id
             WHERE p.status = 'scheduled'
@@ -534,7 +585,12 @@ export function createPrismaDispatchStore(
             t.caption_override AS "captionOverride",
             t.attempts AS "attempts",
             due.caption AS "caption",
-            due.text_only AS "textOnly"
+            due.text_only AS "textOnly",
+            due.background_mode AS "backgroundMode",
+            due.bg_author_name AS "bgAuthorName",
+            due.content_type AS "contentType",
+            due.use_photo_behind_code AS "usePhotoBehindCode",
+            due.bg_credit_caption AS "creditCaption"
         `);
       });
 
@@ -546,6 +602,11 @@ export function createPrismaDispatchStore(
         attempts: Number(row.attempts),
         caption: row.caption,
         textOnly: row.textOnly === true,
+        backgroundMode: row.backgroundMode,
+        bgAuthorName: row.bgAuthorName,
+        contentType: row.contentType,
+        usePhotoBehindCode: row.usePhotoBehindCode === true,
+        creditCaption: row.bgCreditCaption !== false,
       }));
     },
 
@@ -606,6 +667,10 @@ export function createPrismaDispatchStore(
           requiresReconnect: input.requiresReconnect,
         },
       });
+    },
+
+    async trackBackgroundDownload(postId) {
+      return trackBackgroundForPost(postId, { prisma });
     },
 
     async recomputePostStatus(postId) {

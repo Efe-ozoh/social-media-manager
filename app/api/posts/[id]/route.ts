@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import type { Prisma } from "@/lib/generated/prisma/client";
 import { readJsonBody } from "@/lib/api-body";
+import { trackBackgroundForPost } from "@/lib/background-tracking";
 import { createImageStore, keyFromPublicUrl } from "@/lib/image-store";
 import type { PlatformName } from "@/lib/platforms";
 import { renderSaveAndCleanup } from "@/lib/post-media";
@@ -139,7 +140,11 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
                 : existing.bgAuthorUrl,
             },
             store,
-            { previousUrls: existing.media.map((row) => row.url) },
+            {
+              previousUrls: existing.media.map((row) => row.url),
+              usePhotoBehindCode:
+                update.usePhotoBehindCode ?? existing.usePhotoBehindCode,
+            },
           ),
         save,
         deleteStale: (keys) => deleteStaleImages(keys, store),
@@ -152,6 +157,12 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       { error: "Could not render or save the post." },
       { status: 503 },
     );
+  }
+
+  // Scheduling is the first moment the photo is considered used. The helper is
+  // idempotent, so later saves of the same photo do not report it again.
+  if ((update.status ?? existing.status) === "scheduled") {
+    await trackBackgroundForPost(id);
   }
 
   const post = await prisma.post.findUnique({
@@ -215,7 +226,16 @@ async function savePostUpdate(
   if (update.aiPrompt !== undefined) data.aiPrompt = update.aiPrompt;
   if (update.status !== undefined) data.status = update.status;
   if (update.scheduledAt !== undefined) data.scheduledAt = update.scheduledAt;
-  if (update.background !== undefined) Object.assign(data, update.background);
+  if (update.usePhotoBehindCode !== undefined) {
+    data.usePhotoBehindCode = update.usePhotoBehindCode;
+  }
+  if (update.creditCaption !== undefined) data.bgCreditCaption = update.creditCaption;
+  if (update.background !== undefined) {
+    Object.assign(data, update.background);
+    // A solid background has no photo, so nothing is left to attribute or
+    // report; clear the tracked id with the photo it belonged to.
+    if (update.background.backgroundMode === "solid") data.bgDownloadTracked = null;
+  }
 
   await getPrisma().$transaction(async (tx) => {
     await tx.post.update({ where: { id }, data });

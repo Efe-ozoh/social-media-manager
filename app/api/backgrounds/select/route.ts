@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getPrisma } from "@/lib/prisma";
-import { isUnsplashImageUrl, trackDownload } from "@/lib/unsplash";
+import { isUnsplashImageUrl } from "@/lib/unsplash";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -75,8 +75,9 @@ function isUnsplashProfileUrl(value: string): boolean {
  * it is validated and echoed back, so the compose UI can hold a selection
  * before the post exists. Login is enforced by proxy.ts.
  *
- * Selecting a photo is the moment Unsplash considers the photo "used", so the
- * download is tracked here — never from search or preview.
+ * This route never reports a download. Picking a photo is still only a view:
+ * the download is tracked once, when the post is first scheduled or published
+ * (see lib/background-tracking.ts).
  */
 export async function POST(request: NextRequest) {
   let body: Record<string, unknown> | null;
@@ -101,7 +102,6 @@ export async function POST(request: NextRequest) {
   const wantsUnsplash = mode === "unsplash" || (mode === null && photo !== null);
 
   let selection: BackgroundSelection;
-  let downloadLocation: string | null = null;
 
   if (wantsUnsplash) {
     if (!photo) return fail('photo is required when mode is "unsplash".');
@@ -133,15 +133,11 @@ export async function POST(request: NextRequest) {
       bgAuthorUrl: authorUrl,
       bgColor: text(photo.color, 16),
     };
-    downloadLocation = text(photo.downloadLocation, 2048);
   } else if (mode === "solid" || mode === null) {
     selection = solidSelection();
   } else {
     return fail('mode must be "solid" or "unsplash".');
   }
-
-  // Fire-and-forget: a failed download ping must never fail the request.
-  if (downloadLocation) void trackDownload(downloadLocation);
 
   if (!postId) {
     return NextResponse.json(

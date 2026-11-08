@@ -10,9 +10,10 @@
  *    photographer linked to their Unsplash profile plus the required
  *    utm_source / utm_medium=referral parameters.
  *  - Download tracking: `trackDownload()` calls a photo's
- *    `links.download_location` only when the photo is actually chosen for a
- *    post. Search and preview never call it — those are views, which the
- *    hotlinked image request already tracks.
+ *    `links.download_location` only when the photo is actually used by a post
+ *    that is scheduled or published. Search, preview and picking never call
+ *    it — those are views, which the hotlinked image request already tracks.
+ *    `lib/background-tracking.ts` owns the once-per-photo rule.
  *  - Rate limits: `X-Ratelimit-Limit` / `X-Ratelimit-Remaining` are read on
  *    every response; once remaining hits 0 the client stops calling out.
  *
@@ -109,6 +110,7 @@ export function getUnsplashRateLimit(): UnsplashRateLimit {
 export async function searchPortraitPhotos(
   query: string,
   perPage: number = UNSPLASH_RESULTS_PER_PAGE,
+  page = 1,
 ): Promise<BackgroundSearchResult> {
   const text = query.trim().slice(0, 120);
   const key = getUnsplashAccessKey();
@@ -132,7 +134,7 @@ export async function searchPortraitPhotos(
     );
   }
 
-  const cacheKey = `${text.toLowerCase()}|${perPage}`;
+  const cacheKey = `${text.toLowerCase()}|${perPage}|${page}`;
   const hit = searchCache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
     return { photos: hit.photos, error: null, cached: true, rateLimit: lastRateLimit };
@@ -143,6 +145,7 @@ export async function searchPortraitPhotos(
   // SPEC: portrait orientation, so the 4:5 crop loses as little as possible.
   url.searchParams.set("orientation", "portrait");
   url.searchParams.set("per_page", String(perPage));
+  url.searchParams.set("page", String(page));
   url.searchParams.set("content_filter", "high");
 
   try {
@@ -226,6 +229,23 @@ export async function trackDownload(downloadLocation: string): Promise<boolean> 
       cache: "no-store",
     });
     return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True for Unsplash's own download endpoint (`/photos/{id}/download`). It is
+ * pinged when the photo is used, and only then.
+ */
+export function isUnsplashDownloadUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "api.unsplash.com" &&
+      url.pathname.startsWith("/photos/")
+    );
   } catch {
     return false;
   }

@@ -109,6 +109,16 @@ model Post {
   bgAuthorName    String?        @map("bg_author_name") @db.VarChar(120)
   bgAuthorUrl     String?        @map("bg_author_url") @db.Text
   bgColor         String?        @map("bg_color") @db.VarChar(16)
+  // Phase 5c: the picker stores the photo's download endpoint so Unsplash can
+  // be told about the use later, once, when the post is scheduled/published.
+  bgDownloadLocation String?     @map("bg_download_location") @db.Text
+  // The Unsplash id whose download has already been reported; a different id
+  // means the photo changed after tracking and needs its own report.
+  bgDownloadTracked  String?     @map("bg_download_tracked") @db.VarChar(64)
+  // Off by default: code cards stay solid unless the owner opts in.
+  usePhotoBehindCode Boolean     @default(false) @map("use_photo_behind_code")
+  // On by default: automated posts append "Photo by {name} on Unsplash".
+  bgCreditCaption    Boolean     @default(true) @map("bg_credit_caption")
   source          PostSource     @default(manual)
   aiPrompt        String?        @map("ai_prompt") @db.Text
   status          PostStatus     @default(draft)

@@ -15,3 +15,10 @@ export const TELEGRAM_MAX_TEXT = 4_096;
 
 /** sendPhoto / InputMediaPhoto: "0-1024 characters after entities parsing". */
 export const TELEGRAM_MAX_CAPTION = 1_024;
+
+/**
+ * The credit line Unsplash asks for: "Photo by {name} on Unsplash". The suffix
+ * lives here because both the slide renderer and the caption option use it,
+ * and the caption option runs in a client component.
+ */
+export const UNSPLASH_CREDIT_SUFFIX = "on Unsplash";

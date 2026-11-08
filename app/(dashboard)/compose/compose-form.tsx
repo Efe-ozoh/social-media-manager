@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { extractKeywords, isSearchableQuery } from "@/lib/background-query";
 import {
   COMPOSE_PLATFORMS,
   SHARED_CAPTION_LIMIT,
@@ -15,14 +16,18 @@ import {
   formatScheduleLabel,
   selectedPlatforms,
   sharedCaptionLimit,
+  usesBackgroundPhoto,
   utcToLocalDateTime,
   validateComposeDraft,
   zonedDateTimeToUtc,
+  type ComposeBackgroundMode,
+  type ComposeBackgroundPhoto,
   type ComposeContentType,
   type ComposeDraft,
   type ComposeIntent,
   type ComposePlatform,
 } from "@/lib/compose-logic";
+import { photoCreditLine } from "@/lib/background-credit";
 import type { PlatformStatus } from "@/lib/platform-status";
 import { EMPTY_PREVIEW, SlidePreview, type PreviewState } from "./slide-preview";
 import { TextPreview } from "./text-preview";
@@ -55,6 +60,27 @@ const CAROUSEL_OPTIONS = [
   { value: "off", label: "Off", hint: "Keep it to one slide" },
 ] as const;
 
+const BACKGROUND_OPTIONS = [
+  { value: "off", label: "Off", hint: "Keep the solid slide theme." },
+  {
+    value: "auto",
+    label: "Auto",
+    hint: "Keywords from your first sentence, top match used.",
+  },
+  {
+    value: "pick",
+    label: "Pick",
+    hint: "Browse portrait photos and choose one.",
+  },
+] as const satisfies readonly {
+  value: ComposeBackgroundMode;
+  label: string;
+  hint: string;
+}[];
+
+/** A search result, narrowed to what the editor and the API need. */
+type BackgroundPhoto = ComposeBackgroundPhoto & { description: string | null };
+
 const FORMAT_OPTIONS = [
   {
     textOnly: false,
@@ -79,6 +105,19 @@ type ApiPost = {
   carouselMode: string;
   status: string;
   scheduledAt: string | null;
+  usePhotoBehindCode: boolean;
+  creditCaption: boolean;
+  background: {
+    mode: string;
+    query: string | null;
+    unsplashId: string | null;
+    url: string | null;
+    thumbUrl: string | null;
+    authorName: string | null;
+    authorUrl: string | null;
+    color: string | null;
+    downloadLocation: string | null;
+  };
   targets: { platform: string; captionOverride: string | null }[];
 };
 
@@ -122,6 +161,20 @@ function draftFromPost(post: ApiPost, timeZone: string): ComposeDraft {
       ? post.carouselMode
       : "auto";
 
+  // A stored photo reopens in Pick mode: the original Auto/Pick choice is not
+  // stored, and starting in Pick never replaces the saved photo on its own.
+  const savedPhoto = post.background?.mode === "unsplash" && post.background.url
+    ? {
+        id: post.background.unsplashId ?? post.background.url,
+        url: post.background.url,
+        thumbUrl: post.background.thumbUrl ?? post.background.url,
+        authorName: post.background.authorName ?? "Unsplash photographer",
+        authorUrl: post.background.authorUrl ?? "https://unsplash.com",
+        color: post.background.color,
+        downloadLocation: post.background.downloadLocation,
+      }
+    : null;
+
   return {
     ...emptyComposeDraft(),
     textOnly: post.textOnly === true,
@@ -130,6 +183,11 @@ function draftFromPost(post: ApiPost, timeZone: string): ComposeDraft {
     language: post.language ?? "",
     caption: post.caption,
     carouselMode,
+    backgroundMode: savedPhoto ? "pick" : "off",
+    backgroundQuery: post.background?.query ?? "",
+    backgroundPhoto: savedPhoto,
+    usePhotoBehindCode: post.usePhotoBehindCode === true,
+    creditCaption: post.creditCaption !== false,
     scheduleLocal: utcToLocalDateTime(post.scheduledAt, timeZone),
     targets: {
       linkedin: platforms.has("linkedin"),
@@ -170,6 +228,53 @@ function initialTimeZone(): string {
   }
 }
 
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+/** Narrows one /api/backgrounds/search result to what the editor stores. */
+function toBackgroundPhoto(value: unknown): BackgroundPhoto | null {
+  if (typeof value !== "object" || value === null) return null;
+  const photo = value as Record<string, unknown>;
+  const id = readString(photo.id);
+  const url = readString(photo.url);
+  const authorName = readString(photo.authorName);
+  const authorUrl = readString(photo.authorUrl);
+  if (!id || !url || !authorName || !authorUrl) return null;
+
+  return {
+    id,
+    url,
+    thumbUrl: readString(photo.thumbUrl) ?? url,
+    authorName,
+    authorUrl,
+    color: readString(photo.color),
+    downloadLocation: readString(photo.downloadLocation),
+    description: readString(photo.description),
+  };
+}
+
+function parseBackgroundResponse(data: unknown): {
+  photos: BackgroundPhoto[];
+  error: string | null;
+  configured: boolean | null;
+} {
+  const record =
+    typeof data === "object" && data !== null
+      ? (data as { photos?: unknown; error?: unknown; configured?: unknown })
+      : {};
+
+  return {
+    photos: Array.isArray(record.photos)
+      ? record.photos
+          .map(toBackgroundPhoto)
+          .filter((photo): photo is BackgroundPhoto => photo !== null)
+      : [],
+    error: readString(record.error),
+    configured: typeof record.configured === "boolean" ? record.configured : null,
+  };
+}
+
 export function ComposeForm({ postId }: { postId: string | null }) {
   const router = useRouter();
   const [timeZone] = useState<string>(initialTimeZone);
@@ -187,6 +292,12 @@ export function ComposeForm({ postId }: { postId: string | null }) {
   const [formError, setFormError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [pending, setPending] = useState<ComposeIntent | null>(null);
+  const [bgPhotos, setBgPhotos] = useState<BackgroundPhoto[]>([]);
+  const [bgPage, setBgPage] = useState(1);
+  const [bgLoading, setBgLoading] = useState(false);
+  const [bgError, setBgError] = useState<string | null>(null);
+  const [bgConfigured, setBgConfigured] = useState<boolean | null>(null);
+  const [bgQueryTouched, setBgQueryTouched] = useState(false);
   const initializedTargets = useRef(false);
 
   useEffect(() => {
@@ -287,6 +398,59 @@ export function ComposeForm({ postId }: { postId: string | null }) {
     };
   }, [postId, timeZone]);
 
+  // One debounced search per query. Auto uses the top result; Pick only shows
+  // the grid, so choosing a photo is always deliberate. A query shorter than
+  // two characters clears the grid from inside the debounce, never in the
+  // effect body itself.
+  useEffect(() => {
+    if (draft.backgroundMode === "off") return;
+
+    const controller = new AbortController();
+    const mode = draft.backgroundMode;
+    const query = draft.backgroundQuery.trim();
+
+    const timer = window.setTimeout(async () => {
+      if (!isSearchableQuery(query)) {
+        setBgPhotos([]);
+        setBgError(null);
+        setBgLoading(false);
+        return;
+      }
+
+      setBgLoading(true);
+      try {
+        const response = await fetch(
+          `/api/backgrounds/search?q=${encodeURIComponent(query)}&page=1`,
+          { cache: "no-store", signal: controller.signal },
+        );
+        const data = await readJson(response);
+        if (controller.signal.aborted) return;
+
+        const result = parseBackgroundResponse(data);
+        setBgPhotos(result.photos);
+        setBgPage(1);
+        setBgConfigured(result.configured);
+        setBgError(result.error);
+
+        if (mode === "auto" && result.photos[0]) {
+          const top = result.photos[0];
+          setDraft((current) => ({ ...current, backgroundPhoto: top }));
+        }
+      } catch {
+        if (controller.signal.aborted) return;
+        setBgPhotos([]);
+        setBgError("Could not reach Unsplash. A solid background will be used.");
+      } finally {
+        if (!controller.signal.aborted) setBgLoading(false);
+      }
+    }, 700);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [draft.backgroundMode, draft.backgroundQuery]);
+
   const ready = statusLoaded && postLoaded;
   const dirty = baseline !== null && baseline !== draftFingerprint(draft);
   // Text-only posts have no slides to render, so the preview endpoint is never
@@ -295,6 +459,13 @@ export function ComposeForm({ postId }: { postId: string | null }) {
     !draft.textOnly &&
     draft.text.trim() !== "" &&
     draft.text.length <= contentLimit(draft.contentType);
+  // The photo the preview and the saved post will actually use, if any.
+  const backgroundForPreview = usesBackgroundPhoto(draft)
+    ? draft.backgroundPhoto
+    : null;
+  const previewBackgroundUrl = backgroundForPreview?.url ?? null;
+  const previewBackgroundAuthor = backgroundForPreview?.authorName ?? null;
+  const previewBackgroundAuthorUrl = backgroundForPreview?.authorUrl ?? null;
 
   useEffect(() => {
     if (!dirty) return;
@@ -343,6 +514,14 @@ export function ComposeForm({ postId }: { postId: string | null }) {
               draft.contentType === "code"
                 ? draft.language.trim() || null
                 : null,
+            background: previewBackgroundUrl
+              ? {
+                  url: previewBackgroundUrl,
+                  authorName: previewBackgroundAuthor,
+                  authorUrl: previewBackgroundAuthorUrl,
+                }
+              : null,
+            usePhotoBehindCode: draft.usePhotoBehindCode,
           }),
         });
         const data = await readJson(response);
@@ -389,6 +568,10 @@ export function ComposeForm({ postId }: { postId: string | null }) {
     draft.text,
     draft.contentType,
     draft.language,
+    draft.usePhotoBehindCode,
+    previewBackgroundUrl,
+    previewBackgroundAuthor,
+    previewBackgroundAuthorUrl,
   ]);
 
   if (loadError) {
@@ -441,7 +624,24 @@ export function ComposeForm({ postId }: { postId: string | null }) {
     key: K,
     value: ComposeDraft[K],
   ) {
-    setDraft((current) => ({ ...current, [key]: value }));
+    setDraft((current) => {
+      const next: ComposeDraft = { ...current, [key]: value };
+      // In Auto mode the query follows the text until the owner edits it, so
+      // the suggestion is derived here rather than in an effect.
+      if (
+        (key === "text" || key === "caption") &&
+        current.backgroundMode === "auto" &&
+        !bgQueryTouched
+      ) {
+        const suggested =
+          key === "text"
+            ? extractKeywords(String(value)) ||
+              extractKeywords(current.caption)
+            : extractKeywords(current.text) || extractKeywords(String(value));
+        if (suggested !== "") next.backgroundQuery = suggested;
+      }
+      return next;
+    });
   }
 
   function setTarget(platform: ComposePlatform, checked: boolean) {
@@ -449,6 +649,66 @@ export function ComposeForm({ postId }: { postId: string | null }) {
       ...current,
       targets: { ...current.targets, [platform]: checked },
     }));
+  }
+
+  function changeBackgroundMode(mode: ComposeBackgroundMode) {
+    setBgQueryTouched(false);
+    setDraft((current) => {
+      const suggested =
+        extractKeywords(current.text) || extractKeywords(current.caption);
+      return {
+        ...current,
+        backgroundMode: mode,
+        // The photo is kept when switching off, so toggling back is instant;
+        // the payload only sends it while a mode is chosen.
+        backgroundQuery:
+          mode !== "off" && current.backgroundQuery.trim() === ""
+            ? suggested
+            : current.backgroundQuery,
+      };
+    });
+  }
+
+  function selectBackgroundPhoto(photo: BackgroundPhoto) {
+    setBgQueryTouched(true);
+    setDraft((current) => ({
+      ...current,
+      backgroundPhoto: photo,
+      backgroundMode: "pick",
+    }));
+  }
+
+  async function showOtherPhotos() {
+    const query = draft.backgroundQuery.trim();
+    if (!isSearchableQuery(query) || bgLoading) return;
+
+    setBgLoading(true);
+    setBgError(null);
+    try {
+      const response = await fetch(
+        `/api/backgrounds/search?q=${encodeURIComponent(query)}&page=${bgPage + 1}`,
+        { cache: "no-store" },
+      );
+      const result = parseBackgroundResponse(await readJson(response));
+
+      setBgPhotos((current) => [
+        ...current,
+        ...result.photos.filter(
+          (photo) => !current.some((existing) => existing.id === photo.id),
+        ),
+      ]);
+      setBgPage((page) => page + 1);
+      setBgError(
+        result.error ??
+          (result.photos.length === 0
+            ? "No more photos for this search. Try a different query."
+            : null),
+      );
+    } catch {
+      setBgError("Could not load more photos. A solid background will be used.");
+    } finally {
+      setBgLoading(false);
+    }
   }
 
   function setOverride(platform: ComposePlatform, value: string) {
@@ -735,6 +995,221 @@ export function ComposeForm({ postId }: { postId: string | null }) {
                 {editorLimit.toLocaleString("en-US")}
               </p>
             </div>
+            </Card>
+          ) : null}
+
+          {!draft.textOnly ? (
+            <Card
+              title="Background"
+              description="A portrait photo behind the slides, or the solid theme. Unsplash is never loaded unless you choose a mode here."
+            >
+              <div
+                role="radiogroup"
+                aria-label="Background mode"
+                className="grid gap-2 sm:grid-cols-3"
+              >
+                {BACKGROUND_OPTIONS.map((option) => (
+                  <label
+                    key={option.value}
+                    className={`cursor-pointer rounded-lg border p-3 text-sm transition-colors ${
+                      draft.backgroundMode === option.value
+                        ? "border-zinc-400 bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-800/50"
+                        : "border-zinc-200 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/30"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="background"
+                      checked={draft.backgroundMode === option.value}
+                      onChange={() => changeBackgroundMode(option.value)}
+                      className="mr-2"
+                    />
+                    <span className="font-medium">{option.label}</span>
+                    <span className="mt-1 block pl-5 text-xs text-zinc-500 dark:text-zinc-400">
+                      {option.hint}
+                    </span>
+                  </label>
+                ))}
+              </div>
+
+              {draft.backgroundMode !== "off" ? (
+                <div className="mt-4 space-y-3">
+                  <label className="block text-xs font-medium">
+                    Search query
+                    <input
+                      value={draft.backgroundQuery}
+                      onChange={(event) => {
+                        setBgQueryTouched(true);
+                        update("backgroundQuery", event.target.value);
+                      }}
+                      placeholder={
+                        draft.backgroundMode === "auto"
+                          ? "Keywords from your first sentence"
+                          : "For example: misty mountain lake"
+                      }
+                      maxLength={120}
+                      className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-400/30 dark:border-zinc-700 dark:bg-zinc-950"
+                    />
+                  </label>
+                  <p className="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                    {draft.backgroundMode === "auto"
+                      ? "Suggested from the first sentence by dropping stopwords. Edit it if the search is off; the top result is used."
+                      : "Portrait photos from Unsplash. Choose one to use behind the slides."}
+                  </p>
+
+                  {bgConfigured === false ? (
+                    <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:bg-amber-950/50 dark:text-amber-200">
+                      Unsplash is not configured on the server, so a solid
+                      background will be used. Saving and scheduling still work.
+                    </p>
+                  ) : null}
+
+                  {bgError ? (
+                    <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:bg-amber-950/50 dark:text-amber-200">
+                      {bgError} The solid background will be used, and saving
+                      still works.
+                    </p>
+                  ) : null}
+
+                  {bgLoading ? (
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                      Searching Unsplash…
+                    </p>
+                  ) : null}
+
+                  {bgPhotos.length > 0 ? (
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      {bgPhotos.map((photo) => {
+                        const selected = draft.backgroundPhoto?.id === photo.id;
+                        return (
+                          <button
+                            key={photo.id}
+                            type="button"
+                            onClick={() => selectBackgroundPhoto(photo)}
+                            aria-pressed={selected}
+                            aria-label={`Use the photo by ${photo.authorName}`}
+                            className={`relative overflow-hidden rounded-lg border-2 transition-colors ${
+                              selected
+                                ? "border-zinc-900 dark:border-zinc-100"
+                                : "border-transparent hover:border-zinc-300 dark:hover:border-zinc-600"
+                            }`}
+                          >
+                            {/* Hotlinked Unsplash thumbnails: next/image would
+                                need every imgix URL pre-declared. */}
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={photo.thumbUrl}
+                              alt={photo.description ?? `Photo by ${photo.authorName}`}
+                              loading="lazy"
+                              className="aspect-[4/5] w-full object-cover"
+                              style={
+                                photo.color ? { backgroundColor: photo.color } : undefined
+                              }
+                            />
+                            {selected ? (
+                              <span className="absolute left-1.5 top-1.5 rounded-full bg-zinc-900/90 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-white">
+                                Selected
+                              </span>
+                            ) : null}
+                            <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1.5 pt-4 text-left text-[10px] text-white">
+                              {photo.authorName}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+
+                  {!bgLoading &&
+                  bgPhotos.length === 0 &&
+                  !bgError &&
+                  !isSearchableQuery(draft.backgroundQuery) ? (
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                      Type at least 2 characters to search.
+                    </p>
+                  ) : null}
+
+                  {draft.backgroundMode === "pick" && bgPhotos.length > 0 ? (
+                    <button
+                      type="button"
+                      onClick={showOtherPhotos}
+                      disabled={bgLoading}
+                      className="rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                    >
+                      {bgLoading ? "Loading…" : "Show other photos"}
+                    </button>
+                  ) : null}
+
+                  {draft.backgroundPhoto ? (
+                    <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+                      <p className="text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">
+                        Photo by{" "}
+                        <a
+                          href={draft.backgroundPhoto.authorUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="font-medium underline"
+                        >
+                          {draft.backgroundPhoto.authorName}
+                        </a>{" "}
+                        on Unsplash.{" "}
+                        {draft.contentType === "code" && !draft.usePhotoBehindCode
+                          ? "The photo is not drawn while the behind-code toggle is off."
+                          : "The credit is also drawn on slide 1."}
+                      </p>
+
+                      {draft.contentType === "code" ? (
+                        <label className="mt-3 flex items-start gap-2 text-xs">
+                          <input
+                            type="checkbox"
+                            checked={draft.usePhotoBehindCode}
+                            onChange={(event) =>
+                              update("usePhotoBehindCode", event.target.checked)
+                            }
+                            className="mt-0.5 size-4 rounded border-zinc-300 dark:border-zinc-700"
+                          />
+                          <span>
+                            <span className="font-medium">
+                              Use photo behind code
+                            </span>
+                            <span className="mt-0.5 block leading-relaxed text-zinc-500 dark:text-zinc-400">
+                              Off by default: code cards keep their solid theme
+                              so the syntax colours stay readable.
+                            </span>
+                          </span>
+                        </label>
+                      ) : null}
+
+                      <label className="mt-3 flex items-start gap-2 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={draft.creditCaption}
+                          onChange={(event) =>
+                            update("creditCaption", event.target.checked)
+                          }
+                          className="mt-0.5 size-4 rounded border-zinc-300 dark:border-zinc-700"
+                        />
+                        <span>
+                          <span className="font-medium">
+                            Add the credit to the caption
+                          </span>
+                          <span className="mt-0.5 block leading-relaxed text-zinc-500 dark:text-zinc-400">
+                            Appends “
+                            {photoCreditLine(draft.backgroundPhoto.authorName)}
+                            ” to automated posts. Unsplash asks for it whenever
+                            the photo is used.
+                          </span>
+                        </span>
+                      </label>
+                    </div>
+                  ) : (
+                    <p className="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                      No photo chosen yet, so this post will publish with the
+                      solid background.
+                    </p>
+                  )}
+                </div>
+              ) : null}
             </Card>
           ) : null}
 

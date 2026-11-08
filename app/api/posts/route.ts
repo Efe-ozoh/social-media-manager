@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { readJsonBody } from "@/lib/api-body";
+import { trackBackgroundForPost } from "@/lib/background-tracking";
 import { createImageStore, keyFromPublicUrl } from "@/lib/image-store";
 import { parsePostCreate } from "@/lib/post-request";
 import { POST_INCLUDE, serializePost } from "@/lib/post-view";
@@ -54,6 +55,7 @@ export async function POST(request: NextRequest) {
           bgAuthorUrl: input.background.bgAuthorUrl,
         },
         store,
+        { usePhotoBehindCode: input.usePhotoBehindCode },
       );
     } catch {
       return NextResponse.json({ error: "Could not render the slides." }, { status: 502 });
@@ -78,6 +80,8 @@ export async function POST(request: NextRequest) {
         status: input.status,
         scheduledAt: input.scheduledAt,
         ...input.background,
+        usePhotoBehindCode: input.usePhotoBehindCode,
+        bgCreditCaption: input.creditCaption,
         ...(rendered && rendered.media.length > 0
           ? {
               media: {
@@ -110,6 +114,12 @@ export async function POST(request: NextRequest) {
 
   // New posts have no previous render, so this is normally a no-op.
   await deleteStaleImages(rendered?.staleKeys ?? [], store);
+
+  // Unsplash wants a download reported once the photo is actually used. A
+  // draft is not a use; scheduling is. Failures are swallowed by the helper.
+  if (input.status === "scheduled") {
+    await trackBackgroundForPost(id);
+  }
 
   const post = await getPrisma().post.findUnique({
     where: { id },

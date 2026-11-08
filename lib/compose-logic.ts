@@ -22,6 +22,21 @@ export type ComposePlatform = (typeof COMPOSE_PLATFORMS)[number];
 export type ComposeContentType = "text" | "code";
 export type ComposeIntent = "draft" | "schedule" | "publish-now";
 
+/** The picker's three modes; the API only knows solid and unsplash. */
+export type ComposeBackgroundMode = "off" | "auto" | "pick";
+
+/** The subset of an Unsplash photo a post stores, plus its credit. */
+export type ComposeBackgroundPhoto = {
+  id: string;
+  url: string;
+  thumbUrl: string;
+  authorName: string;
+  authorUrl: string;
+  color: string | null;
+  /** Reported to Unsplash once, when the post is scheduled or published. */
+  downloadLocation: string | null;
+};
+
 export type ComposeDraft = {
   /** The caption is the whole post; no slides are rendered or stored. */
   textOnly: boolean;
@@ -30,6 +45,13 @@ export type ComposeDraft = {
   language: string;
   caption: string;
   carouselMode: CarouselMode;
+  backgroundMode: ComposeBackgroundMode;
+  backgroundQuery: string;
+  backgroundPhoto: ComposeBackgroundPhoto | null;
+  /** Off by default: code cards keep their solid theme behind a photo. */
+  usePhotoBehindCode: boolean;
+  /** On by default: automated posts append the photographer's credit. */
+  creditCaption: boolean;
   scheduleLocal: string;
   targets: Record<ComposePlatform, boolean>;
   captionOverrides: Record<ComposePlatform, string>;
@@ -43,6 +65,11 @@ export function emptyComposeDraft(): ComposeDraft {
     language: "",
     caption: "",
     carouselMode: "auto",
+    backgroundMode: "off",
+    backgroundQuery: "",
+    backgroundPhoto: null,
+    usePhotoBehindCode: false,
+    creditCaption: true,
     scheduleLocal: "",
     targets: { linkedin: false, telegram: false },
     captionOverrides: { linkedin: "", telegram: "" },
@@ -78,6 +105,14 @@ export function sharedCaptionLimit(draft: ComposeDraft): number {
   const selected = selectedPlatforms(draft);
   if (selected.length === 0) return SHARED_CAPTION_LIMIT;
   return Math.min(...selected.map(captionLimit), SHARED_CAPTION_LIMIT);
+}
+
+/**
+ * True when a photo will actually be used: a mode is chosen, a photo is held,
+ * and the post has slides to put it behind.
+ */
+export function usesBackgroundPhoto(draft: ComposeDraft): boolean {
+  return !draft.textOnly && draft.backgroundMode !== "off" && draft.backgroundPhoto !== null;
 }
 
 export function effectiveCaption(
@@ -227,6 +262,10 @@ export function buildComposePayload(
       ? zonedDateTimeToUtc(draft.scheduleLocal, input.timeZone)
       : null;
 
+  // A text-only post has no slides, so it is always saved as a solid post and
+  // keeps the default toggles: no photo is used or credited.
+  const photo = usesBackgroundPhoto(draft) ? draft.backgroundPhoto : null;
+
   const payload: ComposePayload = {
     text: draft.textOnly ? "" : draft.text,
     text_only: draft.textOnly,
@@ -239,6 +278,21 @@ export function buildComposePayload(
         : null,
     caption: draft.caption,
     carousel_mode: draft.textOnly ? "off" : draft.carouselMode,
+    background: photo
+      ? {
+          mode: "unsplash",
+          query: draft.backgroundQuery.trim() || null,
+          unsplashId: photo.id,
+          url: photo.url,
+          thumbUrl: photo.thumbUrl,
+          authorName: photo.authorName,
+          authorUrl: photo.authorUrl,
+          color: photo.color,
+          downloadLocation: photo.downloadLocation,
+        }
+      : { mode: "solid" },
+    use_photo_behind_code: photo ? draft.usePhotoBehindCode : false,
+    bg_credit_caption: photo ? draft.creditCaption : true,
     source: "manual",
     targets: selectedPlatforms(draft).map((platform) => ({
       platform,
@@ -271,6 +325,11 @@ export function draftFingerprint(draft: ComposeDraft): string {
     language: draft.language,
     caption: draft.caption,
     carouselMode: draft.carouselMode,
+    backgroundMode: draft.backgroundMode,
+    backgroundQuery: draft.backgroundQuery,
+    backgroundPhoto: draft.backgroundPhoto?.id ?? null,
+    usePhotoBehindCode: draft.usePhotoBehindCode,
+    creditCaption: draft.creditCaption,
     scheduleLocal: draft.scheduleLocal,
     targets: COMPOSE_PLATFORMS.map((platform) => draft.targets[platform]),
     overrides: COMPOSE_PLATFORMS.map(

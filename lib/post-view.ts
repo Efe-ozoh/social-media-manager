@@ -54,6 +54,10 @@ export type PostRecord = {
   bgAuthorName: string | null;
   bgAuthorUrl: string | null;
   bgColor: string | null;
+  bgDownloadLocation: string | null;
+  bgDownloadTracked: string | null;
+  usePhotoBehindCode: boolean;
+  bgCreditCaption: boolean;
   source: string;
   aiPrompt: string | null;
   status: string;
@@ -89,7 +93,13 @@ export function serializePost(post: PostRecord) {
       authorName: post.bgAuthorName,
       authorUrl: post.bgAuthorUrl,
       color: post.bgColor,
+      // Needed when editing: re-saving an unchanged photo must not lose the
+      // endpoint that reports its download. It is a public API URL, not a key.
+      downloadLocation: post.bgDownloadLocation,
+      downloadTracked: post.bgDownloadTracked,
     },
+    usePhotoBehindCode: post.usePhotoBehindCode,
+    creditCaption: post.bgCreditCaption,
     source: post.source,
     aiPrompt: post.aiPrompt,
     status: post.status,

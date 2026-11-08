@@ -22,7 +22,7 @@ import {
 } from "./platforms";
 import { LINKEDIN_MAX_CAPTION, TELEGRAM_MAX_TEXT } from "./publisher-limits";
 import type { SplitContentType } from "./splitter";
-import { isUnsplashImageUrl } from "./unsplash";
+import { isUnsplashDownloadUrl, isUnsplashImageUrl } from "./unsplash";
 
 export const MAX_CAPTION_CHARS = 4_096;
 export const MAX_CAPTION_OVERRIDE_CHARS = 4_096;
@@ -55,6 +55,8 @@ export type PostBackgroundInput = {
   bgAuthorName: string | null;
   bgAuthorUrl: string | null;
   bgColor: string | null;
+  /** The photo's download endpoint; pinged once when the post is used. */
+  bgDownloadLocation: string | null;
 };
 
 export type PostCreateInput = {
@@ -72,6 +74,10 @@ export type PostCreateInput = {
   status: PostStatus;
   scheduledAt: Date | null;
   background: PostBackgroundInput;
+  /** Off by default: code cards keep their solid theme behind a photo. */
+  usePhotoBehindCode: boolean;
+  /** On by default: automated posts append the photographer's credit. */
+  creditCaption: boolean;
   targets: PostTargetInput[];
 };
 
@@ -90,6 +96,8 @@ export type PostUpdateInput = {
   status?: PostStatus;
   scheduledAt?: Date | null;
   background?: PostBackgroundInput;
+  usePhotoBehindCode?: boolean;
+  creditCaption?: boolean;
   targets?: PostTargetInput[];
 };
 
@@ -282,6 +290,7 @@ function parseBackground(
       bgAuthorName: null,
       bgAuthorUrl: null,
       bgColor: null,
+      bgDownloadLocation: null,
     };
   }
 
@@ -336,6 +345,26 @@ function parseBackground(
     return { status: 400, error: "background.color must be a string." };
   }
 
+  // Optional: when it is missing the download simply cannot be reported, and
+  // the post still saves. When it is present it must be Unsplash's endpoint, so
+  // a request is never sent somewhere else.
+  const rawDownloadLocation = get(
+    "downloadLocation",
+    "bg_download_location",
+    "bgDownloadLocation",
+  );
+  if (
+    rawDownloadLocation !== undefined &&
+    rawDownloadLocation !== null &&
+    (typeof rawDownloadLocation !== "string" ||
+      !isUnsplashDownloadUrl(rawDownloadLocation.trim()))
+  ) {
+    return {
+      status: 400,
+      error: "background.downloadLocation must be an api.unsplash.com download URL.",
+    };
+  }
+
   return {
     backgroundMode: "unsplash",
     backgroundQuery: query,
@@ -346,7 +375,21 @@ function parseBackground(
     bgAuthorUrl:
       typeof rawAuthorUrl === "string" ? rawAuthorUrl.trim().slice(0, MAX_URL_CHARS) : null,
     bgColor: color,
+    bgDownloadLocation:
+      typeof rawDownloadLocation === "string"
+        ? rawDownloadLocation.trim().slice(0, MAX_URL_CHARS)
+        : null,
   };
+}
+
+/**
+ * Reads an optional boolean flag.
+ * Returns `undefined` when the field was not sent and `null` when it was sent
+ * with the wrong type, so callers can tell "leave it alone" from "reject it".
+ */
+function parseOptionalBoolean(value: unknown): boolean | null | undefined {
+  if (value === undefined) return undefined;
+  return typeof value === "boolean" ? value : null;
 }
 
 function parseTargets(
@@ -532,6 +575,19 @@ export function parsePostCreate(
   const background = parseBackground(record);
   if ("error" in background) return fail(background.status, background.error);
 
+  const behindCode = parseOptionalBoolean(
+    pick(record, "use_photo_behind_code", "usePhotoBehindCode"),
+  );
+  if (behindCode === null) {
+    return fail(400, "use_photo_behind_code must be true or false.");
+  }
+  const credit = parseOptionalBoolean(
+    pick(record, "bg_credit_caption", "bgCreditCaption", "credit_caption"),
+  );
+  if (credit === null) {
+    return fail(400, "bg_credit_caption must be true or false.");
+  }
+
   const targets = parseTargets(pick(record, "targets"), options.env ?? process.env);
   if (!Array.isArray(targets)) return fail(targets.status, targets.error);
 
@@ -557,6 +613,8 @@ export function parsePostCreate(
       status: finalStatus,
       scheduledAt,
       background,
+      usePhotoBehindCode: behindCode ?? false,
+      creditCaption: credit ?? true,
       targets,
     },
   };
@@ -706,6 +764,20 @@ export function parsePostUpdate(
     update.background = background;
   }
 
+  const behindCode = parseOptionalBoolean(
+    pick(record, "use_photo_behind_code", "usePhotoBehindCode"),
+  );
+  if (behindCode === null) {
+    return fail(400, "use_photo_behind_code must be true or false.");
+  }
+  if (behindCode !== undefined) update.usePhotoBehindCode = behindCode;
+
+  const credit = parseOptionalBoolean(
+    pick(record, "bg_credit_caption", "bgCreditCaption", "credit_caption"),
+  );
+  if (credit === null) return fail(400, "bg_credit_caption must be true or false.");
+  if (credit !== undefined) update.creditCaption = credit;
+
   if (has(record, "targets")) {
     const targets = parseTargets(pick(record, "targets"), options.env ?? process.env);
     if (!Array.isArray(targets)) return fail(targets.status, targets.error);
@@ -740,6 +812,8 @@ export function changesRenderedContent(update: PostUpdateInput): boolean {
     update.contentType !== undefined ||
     update.code !== undefined ||
     update.language !== undefined ||
-    update.background !== undefined
+    update.background !== undefined ||
+    // Whether a photo sits behind a code card changes the rendered pixels.
+    update.usePhotoBehindCode !== undefined
   );
 }

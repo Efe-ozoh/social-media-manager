@@ -134,6 +134,15 @@ model Post {
   @@map("posts")
 }
 
+/// One row per UTC day. The AI routes increment this atomically so
+/// GEN_DAILY_CAP is shared across serverless instances.
+model AiDailyBudget {
+  day   String @id @db.VarChar(10)
+  count Int    @default(0)
+
+  @@map("ai_daily_budgets")
+}
+
 model PostMedia {
   id         String @id @default(uuid()) @db.Uuid
   postId     String @map("post_id") @db.Uuid

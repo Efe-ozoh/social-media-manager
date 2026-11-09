@@ -3,7 +3,11 @@
  * JSON sent to the posts API. The React component owns only UI state.
  */
 
+import { captionWithHashtags } from "./ai-caption";
+import type { GeneratedPost } from "./ai-types";
+import { extractKeywords } from "./background-query";
 import {
+  MAX_AI_PROMPT_CHARS,
   MAX_CAPTION_CHARS,
   MAX_CAPTION_OVERRIDE_CHARS,
   type CarouselMode,
@@ -41,6 +45,8 @@ export type ComposeDraft = {
   /** The caption is the whole post; no slides are rendered or stored. */
   textOnly: boolean;
   text: string;
+  /** Original prose kept in body_text when text was converted into code. */
+  originalText: string;
   contentType: ComposeContentType;
   language: string;
   caption: string;
@@ -52,6 +58,9 @@ export type ComposeDraft = {
   usePhotoBehindCode: boolean;
   /** On by default: automated posts append the photographer's credit. */
   creditCaption: boolean;
+  /** "ai" marks a draft produced in Generate mode. */
+  source: "manual" | "ai";
+  aiPrompt: string;
   scheduleLocal: string;
   targets: Record<ComposePlatform, boolean>;
   captionOverrides: Record<ComposePlatform, string>;
@@ -61,6 +70,7 @@ export function emptyComposeDraft(): ComposeDraft {
   return {
     textOnly: false,
     text: "",
+    originalText: "",
     contentType: "text",
     language: "",
     caption: "",
@@ -70,6 +80,8 @@ export function emptyComposeDraft(): ComposeDraft {
     backgroundPhoto: null,
     usePhotoBehindCode: false,
     creditCaption: true,
+    source: "manual",
+    aiPrompt: "",
     scheduleLocal: "",
     targets: { linkedin: false, telegram: false },
     captionOverrides: { linkedin: "", telegram: "" },
@@ -266,8 +278,15 @@ export function buildComposePayload(
   // keeps the default toggles: no photo is used or credited.
   const photo = usesBackgroundPhoto(draft) ? draft.backgroundPhoto : null;
 
+  const bodyText =
+    draft.textOnly
+      ? ""
+      : draft.contentType === "code" && draft.originalText.trim() !== ""
+        ? draft.originalText
+        : draft.text;
+
   const payload: ComposePayload = {
-    text: draft.textOnly ? "" : draft.text,
+    text: bodyText,
     text_only: draft.textOnly,
     content_type: draft.contentType,
     code:
@@ -293,7 +312,8 @@ export function buildComposePayload(
       : { mode: "solid" },
     use_photo_behind_code: photo ? draft.usePhotoBehindCode : false,
     bg_credit_caption: photo ? draft.creditCaption : true,
-    source: "manual",
+    source: draft.source,
+    ai_prompt: draft.aiPrompt.trim() || null,
     targets: selectedPlatforms(draft).map((platform) => ({
       platform,
       caption_override:
@@ -317,10 +337,51 @@ export function buildComposePayload(
   return payload;
 }
 
+/**
+ * Places a validated /api/generate result into the editor. It never saves or
+ * publishes anything: every other field of the draft is left alone.
+ */
+export function applyGeneratedPost(
+  draft: ComposeDraft,
+  generated: GeneratedPost,
+  prompt: string,
+): ComposeDraft {
+  const text =
+    generated.contentType === "code"
+      ? generated.code ?? generated.bodyText
+      : generated.bodyText;
+  const caption = captionWithHashtags(
+    generated.caption,
+    generated.hashtags,
+    SHARED_CAPTION_LIMIT,
+  );
+  const imageQuery =
+    generated.imageQuery.trim() ||
+    extractKeywords(text) ||
+    extractKeywords(caption);
+
+  return {
+    ...draft,
+    text,
+    originalText: "",
+    contentType: generated.contentType,
+    language:
+      generated.contentType === "code" ? generated.language ?? "" : "",
+    caption,
+    source: "ai",
+    aiPrompt: prompt.trim().slice(0, MAX_AI_PROMPT_CHARS),
+    backgroundQuery:
+      draft.backgroundMode === "auto" && imageQuery !== ""
+        ? imageQuery
+        : draft.backgroundQuery,
+  };
+}
+
 export function draftFingerprint(draft: ComposeDraft): string {
   return JSON.stringify({
     textOnly: draft.textOnly,
     text: draft.text,
+    originalText: draft.originalText,
     contentType: draft.contentType,
     language: draft.language,
     caption: draft.caption,
@@ -330,6 +391,8 @@ export function draftFingerprint(draft: ComposeDraft): string {
     backgroundPhoto: draft.backgroundPhoto?.id ?? null,
     usePhotoBehindCode: draft.usePhotoBehindCode,
     creditCaption: draft.creditCaption,
+    source: draft.source,
+    aiPrompt: draft.aiPrompt,
     scheduleLocal: draft.scheduleLocal,
     targets: COMPOSE_PLATFORMS.map((platform) => draft.targets[platform]),
     overrides: COMPOSE_PLATFORMS.map(

@@ -46,6 +46,7 @@
  * Meta's queue.
  */
 
+import { INSTAGRAM_MAX_CAPTION } from "../publisher-limits";
 import {
   assertMetaToken,
   assertPublicImageUrls,
@@ -61,7 +62,7 @@ import {
 } from "./types";
 
 /** Documented caption limit: "Maximum 2200 characters, 30 hashtags, and 20 @ tags". */
-export const INSTAGRAM_MAX_CAPTION = 2_200;
+export { INSTAGRAM_MAX_CAPTION };
 /**
  * Documented carousel ceiling (see the note above): the Content Publishing
  * guide and the IG User Media reference both say 20.

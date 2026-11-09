@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyGeneratedPost,
   buildComposePayload,
   captionLimit,
   captionUsage,
@@ -15,6 +16,7 @@ import {
   zonedDateTimeToUtc,
   type ComposeDraft,
 } from "./compose-logic";
+import type { GeneratedPost } from "./ai-types";
 import {
   LINKEDIN_MAX_CAPTION,
   TELEGRAM_MAX_CAPTION,
@@ -277,6 +279,108 @@ describe("buildComposePayload", () => {
       "linkedin",
       "telegram",
     ]);
+  });
+});
+
+describe("AI drafts", () => {
+  const generated: GeneratedPost = {
+    bodyText: "Generated body",
+    code: null,
+    language: null,
+    contentType: "text",
+    caption: "Generated caption",
+    hashtags: ["#one", "#two"],
+    variants: {
+      linkedin: "LinkedIn variant",
+      telegram: "Telegram variant",
+      facebook: "Facebook variant",
+      instagram: "Instagram variant",
+    },
+    imageQuery: "developer desk",
+  };
+
+  it("fills the editor without touching targets or schedule", () => {
+    const next = applyGeneratedPost(
+      draft({
+        backgroundMode: "auto",
+        backgroundQuery: "old query",
+        scheduleLocal: "2026-06-02T09:30",
+      }),
+      generated,
+      "  a prompt  ",
+    );
+
+    expect(next).toMatchObject({
+      text: "Generated body",
+      contentType: "text",
+      language: "",
+      caption: "Generated caption\n\n#one #two",
+      source: "ai",
+      aiPrompt: "a prompt",
+      backgroundQuery: "developer desk",
+      scheduleLocal: "2026-06-02T09:30",
+      targets: { linkedin: true, telegram: false },
+    });
+  });
+
+  it("keeps a manually chosen background query", () => {
+    const next = applyGeneratedPost(
+      draft({ backgroundMode: "off", backgroundQuery: "old query" }),
+      generated,
+      "prompt",
+    );
+    expect(next.backgroundQuery).toBe("old query");
+  });
+
+  it("moves generated code into the code editor", () => {
+    const next = applyGeneratedPost(draft(), {
+      ...generated,
+      contentType: "code",
+      bodyText: "const x = 1;",
+      code: "const x = 1;",
+      language: "javascript",
+    }, "prompt");
+
+    expect(next).toMatchObject({
+      text: "const x = 1;",
+      contentType: "code",
+      language: "javascript",
+    });
+  });
+
+  it("keeps the original prose in body_text after conversion", () => {
+    const payload = buildComposePayload({
+      draft: draft({
+        contentType: "code",
+        language: "javascript",
+        text: "const x = 1;",
+        originalText: "A function that stores one.",
+      }),
+      intent: "draft",
+      timeZone: "UTC",
+    });
+
+    expect(payload).toMatchObject({
+      text: "A function that stores one.",
+      content_type: "code",
+      code: "const x = 1;",
+    });
+  });
+
+  it("persists the AI source and prompt in the payload", () => {
+    const payload = buildComposePayload({
+      draft: draft({ source: "ai", aiPrompt: "a prompt" }),
+      intent: "draft",
+      timeZone: "UTC",
+    });
+
+    expect(payload).toMatchObject({
+      source: "ai",
+      ai_prompt: "a prompt",
+    });
+    expect(draftFingerprint(draft({ source: "ai", aiPrompt: "a prompt" }))).not.toBe(
+      draftFingerprint(draft()),
+    );
   });
 });
 

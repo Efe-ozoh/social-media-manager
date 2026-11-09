@@ -3,11 +3,15 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { captionWithHashtags } from "@/lib/ai-caption";
+import type { AiContentType, GeneratedPost } from "@/lib/ai-types";
 import { extractKeywords, isSearchableQuery } from "@/lib/background-query";
 import {
   COMPOSE_PLATFORMS,
   SHARED_CAPTION_LIMIT,
+  applyGeneratedPost,
   buildComposePayload,
+  captionLimit,
   captionNote,
   captionUsage,
   contentLimit,
@@ -60,6 +64,36 @@ const CAROUSEL_OPTIONS = [
   { value: "off", label: "Off", hint: "Keep it to one slide" },
 ] as const;
 
+const TONE_OPTIONS = [
+  { value: "professional", label: "Professional" },
+  { value: "friendly", label: "Friendly" },
+  { value: "educational", label: "Educational" },
+  { value: "punchy", label: "Punchy" },
+  { value: "storytelling", label: "Storytelling" },
+] as const;
+
+const GENERATE_TYPE_OPTIONS = [
+  { value: "auto", label: "Auto" },
+  { value: "text", label: "Text" },
+  { value: "code", label: "Code" },
+] as const;
+
+const CONVERT_OPTIONS = [
+  { value: "auto", label: "Auto" },
+  { value: "always", label: "Always" },
+  { value: "never", label: "Never" },
+] as const;
+
+type ComposeMode = "manual" | "generate";
+type ConvertMode = (typeof CONVERT_OPTIONS)[number]["value"];
+
+type ConversionState = {
+  originalText: string;
+  originalContentType: ComposeContentType;
+  originalLanguage: string;
+  explanation: string;
+};
+
 const BACKGROUND_OPTIONS = [
   { value: "off", label: "Off", hint: "Keep the solid slide theme." },
   {
@@ -107,6 +141,8 @@ type ApiPost = {
   scheduledAt: string | null;
   usePhotoBehindCode: boolean;
   creditCaption: boolean;
+  source: string;
+  aiPrompt: string | null;
   background: {
     mode: string;
     query: string | null;
@@ -179,6 +215,12 @@ function draftFromPost(post: ApiPost, timeZone: string): ComposeDraft {
     ...emptyComposeDraft(),
     textOnly: post.textOnly === true,
     text: code,
+    originalText:
+      post.contentType === "code" && post.code?.trim()
+        ? post.bodyText === post.code
+          ? ""
+          : post.bodyText
+        : "",
     contentType: post.contentType === "code" ? "code" : "text",
     language: post.language ?? "",
     caption: post.caption,
@@ -188,6 +230,8 @@ function draftFromPost(post: ApiPost, timeZone: string): ComposeDraft {
     backgroundPhoto: savedPhoto,
     usePhotoBehindCode: post.usePhotoBehindCode === true,
     creditCaption: post.creditCaption !== false,
+    source: post.source === "ai" ? "ai" : "manual",
+    aiPrompt: post.aiPrompt ?? "",
     scheduleLocal: utcToLocalDateTime(post.scheduledAt, timeZone),
     targets: {
       linkedin: platforms.has("linkedin"),
@@ -210,6 +254,117 @@ function apiError(data: unknown, fallback: string): string {
     if (typeof value === "string" && value.trim() !== "") return value;
   }
   return fallback;
+}
+
+function parseGeneratedPost(data: unknown): GeneratedPost | null {
+  if (typeof data !== "object" || data === null) return null;
+  const record = data as Record<string, unknown>;
+  const variants = record.variants;
+  if (typeof variants !== "object" || variants === null) return null;
+  const variantRecord = variants as Record<string, unknown>;
+
+  const bodyText = typeof record.bodyText === "string" ? record.bodyText : null;
+  const caption = readString(record.caption);
+  const contentType =
+    record.contentType === "code"
+      ? "code"
+      : record.contentType === "text"
+        ? "text"
+        : null;
+  const code =
+    record.code === null
+      ? null
+      : typeof record.code === "string"
+        ? record.code
+        : undefined;
+  const language =
+    record.language === null
+      ? null
+      : typeof record.language === "string"
+        ? record.language
+        : undefined;
+  const linkedin = readString(variantRecord.linkedin);
+  const telegram = readString(variantRecord.telegram);
+  const facebook = readString(variantRecord.facebook);
+  const instagram = readString(variantRecord.instagram);
+
+  if (
+    bodyText === null ||
+    !caption ||
+    !contentType ||
+    code === undefined ||
+    language === undefined ||
+    !linkedin ||
+    !telegram ||
+    !facebook ||
+    !instagram
+  ) {
+    return null;
+  }
+  if (contentType === "code" && !code) return null;
+
+  return {
+    bodyText,
+    code,
+    language,
+    contentType,
+    caption,
+    hashtags: Array.isArray(record.hashtags)
+      ? record.hashtags.filter(
+          (tag): tag is string => typeof tag === "string",
+        )
+      : [],
+    variants: { linkedin, telegram, facebook, instagram },
+    imageQuery:
+      typeof record.imageQuery === "string" ? record.imageQuery : "",
+  };
+}
+
+type ConvertResponse = {
+  contentType: "text" | "code";
+  code: string | null;
+  language: string | null;
+  explanation: string;
+  originalText: string;
+};
+
+function parseConvertResponse(data: unknown): ConvertResponse | null {
+  if (typeof data !== "object" || data === null) return null;
+  const record = data as Record<string, unknown>;
+  const declaredType = record.content_type ?? record.contentType;
+  const contentType =
+    declaredType === "code" || declaredType === "text" ? declaredType : null;
+  const code =
+    record.code === null
+      ? null
+      : typeof record.code === "string"
+        ? record.code
+        : undefined;
+  const language =
+    record.language === null
+      ? null
+      : typeof record.language === "string"
+        ? record.language
+        : undefined;
+
+  if (
+    !contentType ||
+    code === undefined ||
+    language === undefined ||
+    typeof record.originalText !== "string"
+  ) {
+    return null;
+  }
+  if (contentType === "code" && !code) return null;
+
+  return {
+    contentType,
+    code,
+    language,
+    explanation:
+      readString(record.explanation) ?? "The text was left unchanged.",
+    originalText: record.originalText,
+  };
 }
 
 function formatExpiry(iso: string): string {
@@ -298,6 +453,21 @@ export function ComposeForm({ postId }: { postId: string | null }) {
   const [bgError, setBgError] = useState<string | null>(null);
   const [bgConfigured, setBgConfigured] = useState<boolean | null>(null);
   const [bgQueryTouched, setBgQueryTouched] = useState(false);
+  const [mode, setMode] = useState<ComposeMode>("manual");
+  const [prompt, setPrompt] = useState("");
+  const [tone, setTone] = useState("professional");
+  const [generateType, setGenerateType] = useState<AiContentType>("auto");
+  const [generateLanguage, setGenerateLanguage] = useState("");
+  const [aiPending, setAiPending] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiVariants, setAiVariants] = useState<
+    Partial<Record<ComposePlatform, string>>
+  >({});
+  const [aiHashtags, setAiHashtags] = useState<string[]>([]);
+  const [convertMode, setConvertMode] = useState<ConvertMode>("auto");
+  const [converting, setConverting] = useState(false);
+  const [convertError, setConvertError] = useState<string | null>(null);
+  const [conversion, setConversion] = useState<ConversionState | null>(null);
   const initializedTargets = useRef(false);
 
   useEffect(() => {
@@ -383,6 +553,8 @@ export function ComposeForm({ postId }: { postId: string | null }) {
         const next = draftFromPost(editable, timeZone);
         setDraft(next);
         setBaseline(draftFingerprint(next));
+        setMode(next.source === "ai" ? "generate" : "manual");
+        setPrompt(next.aiPrompt);
         setPostLoaded(true);
       })
       .catch((error: unknown) => {
@@ -626,6 +798,9 @@ export function ComposeForm({ postId }: { postId: string | null }) {
   ) {
     setDraft((current) => {
       const next: ComposeDraft = { ...current, [key]: value };
+      if (key === "contentType" && value === "text") {
+        next.originalText = "";
+      }
       // In Auto mode the query follows the text until the owner edits it, so
       // the suggestion is derived here rather than in an effect.
       if (
@@ -719,6 +894,155 @@ export function ComposeForm({ postId }: { postId: string | null }) {
         [platform]: value,
       },
     }));
+  }
+
+  async function runGenerate() {
+    if (aiPending) return;
+    const cleanPrompt = prompt.trim();
+    if (cleanPrompt === "") {
+      setAiError("Write a prompt first.");
+      return;
+    }
+
+    setAiPending(true);
+    setAiError(null);
+    setFormError(null);
+    setNotice(null);
+
+    try {
+      const response = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: cleanPrompt,
+          contentType: generateType,
+          language: generateLanguage || undefined,
+          tone,
+          platforms: selectedPlatforms(draft),
+        }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        throw new Error(apiError(data, "Could not generate a draft."));
+      }
+
+      const generated = parseGeneratedPost(data);
+      if (!generated) {
+        throw new Error("The AI response was incomplete. Try again.");
+      }
+
+      if (draft.backgroundMode === "auto" && generated.imageQuery.trim() !== "") {
+        setBgQueryTouched(true);
+      }
+      setDraft((current) => applyGeneratedPost(current, generated, cleanPrompt));
+      setAiVariants(generated.variants);
+      setAiHashtags(generated.hashtags);
+      setConversion(null);
+      setNotice({
+        tone: "success",
+        text: "AI draft added to the editor. Review it before saving.",
+      });
+    } catch (error) {
+      setAiError(
+        error instanceof Error
+          ? error.message
+          : "Could not generate a draft. Try again.",
+      );
+    } finally {
+      setAiPending(false);
+    }
+  }
+
+  function rewriteForPlatform(platform: ComposePlatform) {
+    const variant = aiVariants[platform];
+    if (!variant) return;
+
+    setOverride(
+      platform,
+      captionWithHashtags(variant, aiHashtags, captionLimit(platform)),
+    );
+    setNotice({
+      tone: "success",
+      text: `Filled ${platform}'s caption override from the AI draft.`,
+    });
+  }
+
+  async function convertCurrentText() {
+    if (converting || convertMode === "never") return;
+    if (draft.text.trim() === "") {
+      setConvertError("Add some text before converting.");
+      return;
+    }
+
+    const beforeContentType = draft.contentType;
+    const beforeLanguage = draft.language;
+
+    setConverting(true);
+    setConvertError(null);
+    setFormError(null);
+    setNotice(null);
+
+    try {
+      const response = await fetch("/api/convert", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: draft.text, mode: convertMode }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        throw new Error(apiError(data, "Could not convert the text."));
+      }
+
+      const result = parseConvertResponse(data);
+      if (!result) {
+        throw new Error("The conversion response was incomplete. Try again.");
+      }
+
+      if (result.contentType === "code" && result.code) {
+        setConversion({
+          originalText: result.originalText,
+          originalContentType: beforeContentType,
+          originalLanguage: beforeLanguage,
+          explanation: result.explanation,
+        });
+        setDraft((current) => ({
+          ...current,
+          text: result.code ?? "",
+          originalText: result.originalText,
+          contentType: "code",
+          language: result.language ?? "",
+        }));
+        setNotice({
+          tone: "success",
+          text: "Converted to code. Check it before posting.",
+        });
+      } else {
+        setConversion(null);
+        setNotice({ tone: "success", text: result.explanation });
+      }
+    } catch (error) {
+      setConvertError(
+        error instanceof Error
+          ? error.message
+          : "Could not convert the text. Try again.",
+      );
+    } finally {
+      setConverting(false);
+    }
+  }
+
+  function switchBackToOriginal() {
+    if (!conversion) return;
+    setDraft((current) => ({
+      ...current,
+      text: conversion.originalText,
+      originalText: "",
+      contentType: conversion.originalContentType,
+      language: conversion.originalLanguage,
+    }));
+    setConversion(null);
+    setConvertError(null);
+    setNotice({ tone: "success", text: "Restored the original text." });
   }
 
   async function submit(intent: ComposeIntent) {
@@ -852,6 +1176,11 @@ export function ComposeForm({ postId }: { postId: string | null }) {
           </p>
         </div>
         <div className="flex items-center gap-3 text-xs text-zinc-500 dark:text-zinc-400">
+          {draft.source === "ai" ? (
+            <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-violet-800 dark:bg-violet-950/60 dark:text-violet-200">
+              AI draft
+            </span>
+          ) : null}
           {dirty ? <span>Unsaved changes</span> : null}
           {savedPostId ? (
             <Link
@@ -866,6 +1195,153 @@ export function ComposeForm({ postId }: { postId: string | null }) {
 
       <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(300px,380px)] lg:items-start">
         <div className="space-y-5">
+          <Card
+            title="Mode"
+            description="Generate creates a draft only. Nothing is saved or published until you use the buttons below."
+          >
+            <div
+              role="radiogroup"
+              aria-label="Compose mode"
+              className="grid gap-2 sm:grid-cols-2"
+            >
+              {(
+                [
+                  {
+                    value: "manual",
+                    label: "Write it myself",
+                    hint: "Type or paste the post. Full control.",
+                  },
+                  {
+                    value: "generate",
+                    label: "Generate with AI",
+                    hint: "Ask Gemini for a draft, then edit every field.",
+                  },
+                ] as const
+              ).map((option) => (
+                <label
+                  key={option.value}
+                  className={`cursor-pointer rounded-lg border p-3 text-sm transition-colors ${
+                    mode === option.value
+                      ? "border-zinc-400 bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-800/50"
+                      : "border-zinc-200 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/30"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="compose-mode"
+                    checked={mode === option.value}
+                    onChange={() => setMode(option.value)}
+                    className="mr-2"
+                  />
+                  <span className="font-medium">{option.label}</span>
+                  <span className="mt-1 block pl-5 text-xs text-zinc-500 dark:text-zinc-400">
+                    {option.hint}
+                  </span>
+                </label>
+              ))}
+            </div>
+          </Card>
+
+          {mode === "generate" ? (
+            <Card
+              title="Generate with AI"
+              description="Describe the post. The response fills the editor below and is never published automatically."
+            >
+              <label className="block text-sm">
+                <span className="font-medium">Prompt</span>
+                <textarea
+                  value={prompt}
+                  onChange={(event) => setPrompt(event.target.value)}
+                  rows={4}
+                  maxLength={4000}
+                  disabled={aiPending}
+                  placeholder="Explain closures with a short example, aimed at junior developers…"
+                  className="mt-1 w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm leading-relaxed outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-400/30 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-950"
+                />
+              </label>
+
+              <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                <label className="block text-xs text-zinc-600 dark:text-zinc-400">
+                  <span className="font-medium">Tone</span>
+                  <select
+                    value={tone}
+                    onChange={(event) => setTone(event.target.value)}
+                    disabled={aiPending}
+                    className="mt-1 w-full rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+                  >
+                    {TONE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="block text-xs text-zinc-600 dark:text-zinc-400">
+                  <span className="font-medium">Content</span>
+                  <select
+                    value={generateType}
+                    onChange={(event) =>
+                      setGenerateType(event.target.value as AiContentType)
+                    }
+                    disabled={aiPending}
+                    className="mt-1 w-full rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+                  >
+                    {GENERATE_TYPE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="block text-xs text-zinc-600 dark:text-zinc-400">
+                  <span className="font-medium">Language</span>
+                  <select
+                    value={generateLanguage}
+                    onChange={(event) => setGenerateLanguage(event.target.value)}
+                    disabled={aiPending || generateType === "text"}
+                    className="mt-1 w-full rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900"
+                  >
+                    <option value="">Auto</option>
+                    {LANGUAGE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={runGenerate}
+                  disabled={aiPending || prompt.trim() === ""}
+                  className="rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                >
+                  {aiPending
+                    ? "Generating…"
+                    : draft.source === "ai"
+                      ? "Regenerate"
+                      : "Generate draft"}
+                </button>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                  Uses one AI request. Check facts and links before publishing.
+                </p>
+              </div>
+
+              {aiError ? (
+                <p
+                  role="alert"
+                  className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300"
+                >
+                  {aiError}
+                </p>
+              ) : null}
+            </Card>
+          ) : null}
+
           <Card
             title="Format"
             description="Text-only posts publish the caption as plain text: no slide is rendered, stored or uploaded."
@@ -928,16 +1404,43 @@ export function ComposeForm({ postId }: { postId: string | null }) {
                 ))}
               </div>
 
-              <label className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-                Auto-convert
-                <select
-                  disabled
-                  aria-label="Auto-convert to code (coming in Phase 6)"
-                  className="rounded-md border border-zinc-300 bg-zinc-100 px-2 py-1 opacity-70 dark:border-zinc-700 dark:bg-zinc-900"
+              <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+                <label className="flex items-center gap-2">
+                  Auto-convert
+                  <select
+                    value={convertMode}
+                    onChange={(event) =>
+                      setConvertMode(event.target.value as ConvertMode)
+                    }
+                    disabled={converting}
+                    aria-label="Auto-convert to code"
+                    className="rounded-md border border-zinc-300 bg-white px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
+                  >
+                    {CONVERT_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={convertCurrentText}
+                  disabled={
+                    converting ||
+                    convertMode === "never" ||
+                    draft.contentType === "code" ||
+                    draft.text.trim() === ""
+                  }
+                  className="rounded-md border border-zinc-300 px-2 py-1 font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                 >
-                  <option>Off — Phase 6</option>
-                </select>
-              </label>
+                  {converting
+                    ? "Converting…"
+                    : draft.contentType === "code"
+                      ? "Already code"
+                      : "Convert to code"}
+                </button>
+              </div>
             </div>
 
             <textarea
@@ -957,6 +1460,31 @@ export function ComposeForm({ postId }: { postId: string | null }) {
                   : "border-zinc-300 dark:border-zinc-700"
               } ${draft.contentType === "code" ? "font-mono" : ""}`}
             />
+
+            {convertError ? (
+              <p
+                role="alert"
+                className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300"
+              >
+                {convertError}
+              </p>
+            ) : null}
+
+            {conversion ? (
+              <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-800/70 dark:bg-amber-950/30 dark:text-amber-200">
+                <p className="font-medium">Check the generated code before posting.</p>
+                {conversion.explanation ? (
+                  <p className="mt-1 text-xs">{conversion.explanation}</p>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={switchBackToOriginal}
+                  className="mt-2 rounded-md border border-amber-400 px-2 py-1 text-xs font-medium transition-colors hover:bg-amber-100 dark:border-amber-700 dark:hover:bg-amber-900/40"
+                >
+                  Switch back to original text
+                </button>
+              </div>
+            ) : null}
 
             <div className="mt-2 flex flex-wrap items-start justify-between gap-2">
               <div className="min-w-0">
@@ -1378,6 +1906,21 @@ export function ComposeForm({ postId }: { postId: string | null }) {
 
                     {selectedPlatform ? (
                       <div className="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-700">
+                        {aiVariants[platform] ? (
+                          <div className="mb-3 flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => rewriteForPlatform(platform)}
+                              disabled={disabled}
+                              className="rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                            >
+                              Rewrite for {status?.label ?? platform}
+                            </button>
+                            <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                              Fills the override below. No extra AI request.
+                            </span>
+                          </div>
+                        ) : null}
                         <label className="block text-xs font-medium">
                           Caption override for {status?.label ?? platform}{" "}
                           <span className="font-normal text-zinc-500 dark:text-zinc-400">

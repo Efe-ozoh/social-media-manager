@@ -27,6 +27,7 @@
  * HTTPS: see `assertPublicImageUrls`.
  */
 
+import { FACEBOOK_MAX_CAPTION } from "../publisher-limits";
 import {
   assertMetaToken,
   assertPublicImageUrls,
@@ -46,7 +47,7 @@ import {
  * references describe `message` without stating a maximum, so this is the
  * value Facebook has enforced historically, kept as a safety bound.
  */
-export const FACEBOOK_MAX_CAPTION = 63_206;
+export { FACEBOOK_MAX_CAPTION };
 /** Our own carousel cap; Meta documents no attached_media maximum. */
 export const FACEBOOK_MAX_IMAGES = 10;
 

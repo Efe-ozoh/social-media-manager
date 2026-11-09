@@ -16,6 +16,12 @@ export const TELEGRAM_MAX_TEXT = 4_096;
 /** sendPhoto / InputMediaPhoto: "0-1024 characters after entities parsing". */
 export const TELEGRAM_MAX_CAPTION = 1_024;
 
+/** Facebook's long-standing Page post length limit. */
+export const FACEBOOK_MAX_CAPTION = 63_206;
+
+/** Instagram's documented caption limit: "Maximum 2200 characters". */
+export const INSTAGRAM_MAX_CAPTION = 2_200;
+
 /**
  * The credit line Unsplash asks for: "Photo by {name} on Unsplash". The suffix
  * lives here because both the slide renderer and the caption option use it,

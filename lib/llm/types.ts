@@ -9,6 +9,7 @@
 export type LlmErrorCode =
   | "missing_key"
   | "invalid_key"
+  | "model_not_found"
   | "quota"
   | "safety"
   | "timeout"
@@ -19,6 +20,7 @@ export type LlmErrorCode =
 const DEFAULT_MESSAGES: Record<LlmErrorCode, string> = {
   missing_key: "AI generation is not configured. Set GEMINI_API_KEY in the environment.",
   invalid_key: "The AI service rejected the configured API key. Check GEMINI_API_KEY.",
+  model_not_found: "The configured AI model was not found. Check GEMINI_MODEL.",
   quota: "The AI service is rate limited or out of quota. Try again later.",
   safety: "The AI service blocked this request. Try rephrasing the prompt.",
   timeout: "The AI service took too long to respond. Try again.",
@@ -73,6 +75,7 @@ export type LlmHttpError = {
 const HTTP_STATUS: Record<LlmErrorCode, number> = {
   missing_key: 503,
   invalid_key: 502,
+  model_not_found: 502,
   quota: 429,
   safety: 422,
   timeout: 504,

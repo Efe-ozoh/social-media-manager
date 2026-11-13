@@ -20,7 +20,7 @@ import {
   type LlmProvider,
 } from "./types";
 
-export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
+export const DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite";
 
 type GeminiClientLike = {
   models: {
